@@ -1,0 +1,11 @@
+# Large video files
+videos/
+*.MP4
+*.mp4
+*.avi
+*.mov
+
+# OS / Editor files
+.DS_Store
+*.swp
+*~
