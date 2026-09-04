@@ -4,10 +4,11 @@ import { DroneVideoCard } from './components/DroneVideoCard';
 import { AlertBanner } from './components/AlertBanner';
 import { ActivityDrawer } from './components/ActivityDrawer';
 import { SimulationModal } from './components/SimulationModal';
+import { AddStreamModal } from './components/AddStreamModal';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useAudioAlert } from './hooks/useAudioAlert';
 import { DroneStream, AnalyticsEvent } from './types';
-import { PlusCircle, ShieldCheck } from 'lucide-react';
+import { PlusCircle, ShieldCheck, Radio } from 'lucide-react';
 
 export function App() {
   const [streams, setStreams] = useState<DroneStream[]>([]);
@@ -16,6 +17,7 @@ export function App() {
   const [currentCriticalAlert, setCurrentCriticalAlert] = useState<AnalyticsEvent | null>(null);
   const [unackAlertCount, setUnackAlertCount] = useState<number>(0);
   const [isSimModalOpen, setIsSimModalOpen] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [layoutGrid, setLayoutGrid] = useState<'1x1' | '2x2' | '3x3'>('2x2');
 
   const { isMuted, toggleMute, triggerAlarmSound } = useAudioAlert();
@@ -103,6 +105,7 @@ export function App() {
         isMuted={isMuted}
         onToggleMute={toggleMute}
         onOpenSimulationModal={() => setIsSimModalOpen(true)}
+        onOpenAddStreamModal={() => setIsAddModalOpen(true)}
         layoutGrid={layoutGrid}
         setLayoutGrid={setLayoutGrid}
       />
@@ -122,13 +125,22 @@ export function App() {
               <p className="text-sm text-slate-400 max-w-md mb-6 leading-relaxed">
                 Launch an RTSP simulation stream using local test videos or add a live drone feed URL to start real-time Gemini AI surveillance.
               </p>
-              <button
-                onClick={() => setIsSimModalOpen(true)}
-                className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-xs px-6 py-3 rounded-xl shadow-lg shadow-cyan-500/20 transition-all flex items-center gap-2 border border-cyan-400/30"
-              >
-                <PlusCircle className="w-4 h-4" />
-                <span>Launch RTSP Test Simulator</span>
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setIsAddModalOpen(true)}
+                  className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs px-5 py-3 rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex items-center gap-2 border border-emerald-400/30"
+                >
+                  <Radio className="w-4 h-4" />
+                  <span>Add Live RTSP Drone</span>
+                </button>
+                <button
+                  onClick={() => setIsSimModalOpen(true)}
+                  className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-xs px-5 py-3 rounded-xl shadow-lg shadow-cyan-500/20 transition-all flex items-center gap-2 border border-cyan-400/30"
+                >
+                  <PlusCircle className="w-4 h-4" />
+                  <span>Launch RTSP Test Simulator</span>
+                </button>
+              </div>
             </div>
           ) : (
             <div className={`grid gap-5 ${gridClasses}`}>
@@ -159,6 +171,13 @@ export function App() {
         isOpen={isSimModalOpen}
         onClose={() => setIsSimModalOpen(false)}
         onSimulationLaunched={fetchStreams}
+      />
+
+      {/* Add Live RTSP Stream Modal */}
+      <AddStreamModal
+        isOpen={isAddModalOpen}
+        onClose={() => setIsAddModalOpen(false)}
+        onStreamAdded={fetchStreams}
       />
     </div>
   );

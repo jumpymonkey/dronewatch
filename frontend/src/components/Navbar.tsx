@@ -8,6 +8,7 @@ interface NavbarProps {
   isMuted: boolean;
   onToggleMute: () => void;
   onOpenSimulationModal: () => void;
+  onOpenAddStreamModal: () => void;
   layoutGrid: '1x1' | '2x2' | '3x3';
   setLayoutGrid: (grid: '1x1' | '2x2' | '3x3') => void;
 }
@@ -19,6 +20,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isMuted,
   onToggleMute,
   onOpenSimulationModal,
+  onOpenAddStreamModal,
   layoutGrid,
   setLayoutGrid
 }) => {
@@ -81,6 +83,15 @@ export const Navbar: React.FC<NavbarProps> = ({
           title={isMuted ? 'Audio Alerts Muted' : 'Audio Alerts Enabled'}
         >
           {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-emerald-400" />}
+        </button>
+
+        {/* Add Live RTSP Drone Button */}
+        <button
+          onClick={onOpenAddStreamModal}
+          className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold px-3.5 py-2 rounded-lg shadow-md shadow-emerald-500/20 transition-all flex items-center gap-2 border border-emerald-400/30"
+        >
+          <Radio className="w-4 h-4" />
+          <span>Add Live RTSP Drone</span>
         </button>
 
         {/* Launch Test Simulator Button */}
