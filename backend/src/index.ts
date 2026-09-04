@@ -34,8 +34,10 @@ app.get('*', (req, res, next) => {
 // Initialize Socket.io Push Gateway
 new WebSocketPushGateway(server);
 
+import { checkDatabaseConnection } from './db/index.js';
+
 // Start HTTP Server
-server.listen(config.port, () => {
+server.listen(config.port, async () => {
   console.log(`==================================================`);
   console.log(`  DroneWatch GCP Backend Service Running`);
   console.log(`  Port:        ${config.port}`);
@@ -43,4 +45,6 @@ server.listen(config.port, () => {
   console.log(`  Pub/Sub:     ${config.gcp.pubsubTopicAlerts || 'Local Event Bus'}`);
   console.log(`  AlloyDB Host: ${config.db.host}:${config.db.port}`);
   console.log(`==================================================`);
+  await checkDatabaseConnection();
 });
+
