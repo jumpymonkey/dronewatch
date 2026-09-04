@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { config } from '../../config/index.js';
 import { query } from '../../db/index.js';
 import { eventBus, AlertEventPayload } from '../events/eventBus.js';
@@ -19,17 +19,17 @@ export interface GeminiFrameAnalysisResult {
 }
 
 export class GeminiAnalysisEngine {
-  private ai?: GoogleGenAI;
+  private ai?: GoogleGenerativeAI;
   private isConfigured: boolean = false;
 
   constructor() {
     if (config.gemini.apiKey && config.gemini.apiKey !== 'your_gemini_api_key_here') {
       try {
-        this.ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
+        this.ai = new GoogleGenerativeAI(config.gemini.apiKey);
         this.isConfigured = true;
         console.log(`Gemini AI Analysis Engine initialized using model: ${config.gemini.model}`);
       } catch (err) {
-        console.warn('Failed to initialize GoogleGenAI client:', err);
+        console.warn('Failed to initialize GoogleGenerativeAI client:', err);
       }
     } else {
       console.warn('GEMINI_API_KEY is not configured. Running in simulated fallback mode.');
@@ -78,28 +78,24 @@ Return STRICT JSON matching this schema:
   ]
 }`;
 
-      const response = await this.ai.models.generateContent({
+      const model = this.ai.getGenerativeModel({
         model: config.gemini.model,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'image/jpeg',
-                  data: base64Image
-                }
-              },
-              { text: prompt }
-            ]
-          }
-        ],
-        config: {
+        generationConfig: {
           responseMimeType: 'application/json'
         }
       });
 
-      const responseText = response.text;
+      const response = await model.generateContent([
+        {
+          inlineData: {
+            mimeType: 'image/jpeg',
+            data: base64Image
+          }
+        },
+        prompt
+      ]);
+
+      const responseText = response.response.text();
       if (!responseText) {
         throw new Error('Empty response received from Gemini API');
       }
@@ -129,7 +125,6 @@ Return STRICT JSON matching this schema:
     droneName: string,
     timestamp: string
   ): Promise<GeminiFrameAnalysisResult> {
-    // Generate deterministic simulated findings when no API key is provided
     const severities: Array<'LOW' | 'MEDIUM' | 'CRITICAL'> = ['LOW', 'LOW', 'LOW', 'MEDIUM', 'CRITICAL'];
     const randomSeverity = severities[Math.floor(Math.random() * severities.length)];
 
@@ -181,7 +176,6 @@ Return STRICT JSON matching this schema:
     try {
       const eventId = uuidv4();
       
-      // 1. Insert into stream_analytics
       await query(
         `INSERT INTO stream_analytics 
           (event_id, stream_id, timestamp, severity, category, summary, detailed_analysis, bounding_boxes, raw_response)
@@ -201,7 +195,6 @@ Return STRICT JSON matching this schema:
 
       let alertId: string | undefined;
 
-      // 2. Insert into urgent_alerts if CRITICAL
       if (result.severity === 'CRITICAL') {
         alertId = uuidv4();
         await query(
@@ -212,7 +205,6 @@ Return STRICT JSON matching this schema:
         );
       }
 
-      // 3. Dispatch to EventBus
       const payload: AlertEventPayload = {
         event_type: 'CRITICAL_ALERT',
         alert_id: alertId,

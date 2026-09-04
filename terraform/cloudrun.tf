@@ -27,10 +27,6 @@ resource "google_cloud_run_v2_service" "backend" {
         value = "production"
       }
       env {
-        name  = "PORT"
-        value = "8080"
-      }
-      env {
         name  = "GCP_PROJECT_ID"
         value = var.project_id
       }
@@ -58,11 +54,4 @@ resource "google_cloud_run_v2_service" "backend" {
   }
 }
 
-# Allow Public Unauthenticated Access to Cloud Run Service
-resource "google_cloud_run_v2_service_iam_member" "backend_public" {
-  project  = google_cloud_run_v2_service.backend.project
-  location = google_cloud_run_v2_service.backend.location
-  name     = google_cloud_run_v2_service.backend.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
+
