@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dronewatch-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: dronewatch
+      POSTGRES_USER: dronewatch
+      POSTGRES_PASSWORD: dronewatch_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/20-seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dronewatch -d dronewatch"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: dronewatch-mediamtx
+    restart: always
+    ports:
+      - "8554:8554"   # RTSP
+      - "8888:8888"   # HLS
+      - "9997:9997"   # API
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+volumes:
+  pgdata:

@@ -1,0 +1,26 @@
+# MediaMTX Configuration for DroneWatch Local RTSP Media Server
+
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP Server
+rtsp: true
+rtspAddress: :8554
+protocols: [tcp, udp]
+
+# HLS Transcoder / Web Player
+hls: true
+hlsAddress: :8888
+hlsAlwaysRemux: true
+hlsVariant: lowLatency
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+# HTTP API
+api: true
+apiAddress: :9997
+
+# Path templates for dynamic streams
+paths:
+  all_others:
