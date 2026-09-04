@@ -7,6 +7,14 @@ resource "google_cloud_run_v2_service" "backend" {
   template {
     service_account = google_service_account.dronewatch_sa.email
 
+    vpc_access {
+      network_interfaces {
+        network    = google_compute_network.vpc_network.name
+        subnetwork = google_compute_subnetwork.subnet.name
+      }
+      egress = "ALL_TRAFFIC"
+    }
+
     scaling {
       min_instance_count = 1
       max_instance_count = 10
@@ -47,8 +55,20 @@ resource "google_cloud_run_v2_service" "backend" {
         value = google_alloydb_instance.dronewatch_primary.ip_address
       }
       env {
+        name  = "DB_USER"
+        value = "postgres"
+      }
+      env {
+        name  = "DB_PASSWORD"
+        value = var.alloydb_password
+      }
+      env {
         name  = "DB_NAME"
-        value = "dronewatch"
+        value = "postgres"
+      }
+      env {
+        name  = "DB_SSL"
+        value = "true"
       }
     }
   }
