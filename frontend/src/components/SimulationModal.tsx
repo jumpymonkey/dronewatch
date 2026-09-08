@@ -136,7 +136,7 @@ export const SimulationModal: React.FC<SimulationModalProps> = ({
           <div className="bg-[#0B0F17] border border-[#212D40] rounded-xl p-3.5 text-xs text-slate-400 flex items-start gap-2.5">
             <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
             <p className="leading-relaxed">
-              Clicking launch will start a continuous RTSP stream loop at <code className="text-cyan-300 font-mono text-[11px]">rtsp://localhost:8554/sim/...</code> and run real-time Gemini AI visual analysis.
+              Clicking launch will start a continuous simulated video feed from GCS and run real-time Gemini AI visual analysis.
             </p>
           </div>
 

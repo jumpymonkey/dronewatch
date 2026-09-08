@@ -1,6 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
 import fs from 'fs';
+import { Storage } from '@google-cloud/storage';
 import { config } from '../../config/index.js';
 import { query } from '../../db/index.js';
 import { streamManager } from '../rtsp/streamManager.js';
@@ -13,12 +14,49 @@ export interface SimulationLaunchParams {
 class RtspSimulatorService {
   private activeSimulations: Map<string, ffmpeg.FfmpegCommand> = new Map();
   private videosDir: string;
+  private tempDir: string;
+  private storage: Storage;
 
   constructor() {
     this.videosDir = path.resolve(process.cwd(), '../videos');
     if (!fs.existsSync(this.videosDir)) {
       this.videosDir = path.resolve(process.cwd(), 'videos');
     }
+
+    this.tempDir = path.resolve(process.cwd(), 'temp_videos');
+    if (!fs.existsSync(this.tempDir)) {
+      fs.mkdirSync(this.tempDir, { recursive: true });
+    }
+
+    this.storage = new Storage();
+  }
+
+  public async getAvailableVideos(): Promise<string[]> {
+    const videoFiles = new Set<string>();
+
+    // 1. Try listing from GCS bucket videos/ folder
+    try {
+      const bucketName = config.gcp.gcsBucketName;
+      const bucket = this.storage.bucket(bucketName);
+      const [files] = await bucket.getFiles({ prefix: 'videos/' });
+
+      for (const file of files) {
+        const basename = path.basename(file.name);
+        if (basename && basename.toUpperCase().endsWith('.MP4')) {
+          videoFiles.add(basename);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Notice: Could not list GCS simulation videos:', err.message);
+    }
+
+    // 2. Also check local disk videos/ directory
+    if (fs.existsSync(this.videosDir)) {
+      const localFiles = fs.readdirSync(this.videosDir).filter((f) => f.toUpperCase().endsWith('.MP4'));
+      localFiles.forEach((f) => videoFiles.add(f));
+    }
+
+    return Array.from(videoFiles).sort();
   }
 
   public async launchSimulation(params: SimulationLaunchParams): Promise<{
@@ -27,60 +65,85 @@ class RtspSimulatorService {
     drone_name: string;
     source_file: string;
   }> {
-    const videoPath = path.join(this.videosDir, params.source_file);
+    // 1. Locate video file locally or download from GCS
+    let videoPath = path.join(this.videosDir, params.source_file);
 
     if (!fs.existsSync(videoPath)) {
-      throw new Error(`Local MP4 test video not found: ${videoPath}`);
+      videoPath = path.join(this.tempDir, params.source_file);
+
+      if (!fs.existsSync(videoPath)) {
+        console.log(`Downloading ${params.source_file} from GCS bucket ${config.gcp.gcsBucketName}...`);
+        const bucket = this.storage.bucket(config.gcp.gcsBucketName);
+        const gcsFile = bucket.file(`videos/${params.source_file}`);
+
+        const [exists] = await gcsFile.exists();
+        if (!exists) {
+          throw new Error(`Simulation MP4 video not found in GCS or local disk: ${params.source_file}`);
+        }
+
+        await gcsFile.download({ destination: videoPath });
+        console.log(`Successfully downloaded ${params.source_file} to ${videoPath}`);
+      }
     }
 
     const pathKey = params.source_file.toLowerCase().replace(/[^a-z0-9]/g, '_');
-    const rtspUrl = `rtsp://${config.rtsp.host}:${config.rtsp.port}/sim/${pathKey}`;
+    const simulatedRtspUrl = `rtsp://${config.rtsp.host}:${config.rtsp.port}/sim/${pathKey}`;
 
-    // 1. Insert or update stream in database
+    // 2. Insert or update stream record in AlloyDB
     const dbRes = await query(
       `INSERT INTO drone_streams (drone_name, rtsp_url, status, is_simulation, source_file)
        VALUES ($1, $2, 'ACTIVE', true, $3)
        ON CONFLICT (rtsp_url) DO UPDATE
        SET drone_name = EXCLUDED.drone_name, status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
        RETURNING stream_id`,
-      [params.drone_name, rtspUrl, params.source_file]
+      [params.drone_name, simulatedRtspUrl, params.source_file]
     );
 
     const streamId = dbRes.rows[0].stream_id;
 
-    // 2. Launch FFmpeg looping process to push stream to MediaMTX
+    // 3. Launch continuous FFmpeg HLS transcoding for simulation video
     if (!this.activeSimulations.has(streamId)) {
-      console.log(`Piping ${params.source_file} to MediaMTX RTSP endpoint: ${rtspUrl}`);
+      const hlsDir = path.resolve(process.cwd(), 'temp_hls', streamId);
+      if (!fs.existsSync(hlsDir)) {
+        fs.mkdirSync(hlsDir, { recursive: true });
+      }
+      const hlsOutput = path.join(hlsDir, 'index.m3u8');
+
+      console.log(`Starting FFmpeg HLS loop for simulation ${params.drone_name} using ${params.source_file}`);
 
       const proc = ffmpeg(videoPath)
         .inputOptions(['-stream_loop -1', '-re'])
-        .outputOptions(['-c:v libx264', '-preset ultrafast', '-tune zerolatency', '-f rtsp'])
-        .output(rtspUrl)
+        .outputOptions([
+          '-c:v libx264',
+          '-preset ultrafast',
+          '-tune zerolatency',
+          '-c:a aac',
+          '-f hls',
+          '-hls_time 2',
+          '-hls_list_size 5',
+          '-hls_flags delete_segments'
+        ])
+        .output(hlsOutput)
         .on('start', (cmd) => {
-          console.log(`FFmpeg RTSP Simulation process started for ${params.drone_name}`);
+          console.log(`FFmpeg HLS Simulation process started for ${params.drone_name}`);
         })
         .on('error', (err) => {
-          console.warn(`FFmpeg RTSP Simulation notice for ${params.drone_name}:`, err.message);
+          console.warn(`FFmpeg HLS Simulation notice for ${params.drone_name}:`, err.message);
         });
 
       proc.run();
       this.activeSimulations.set(streamId, proc);
     }
 
-    // 3. Register stream with StreamManager for frame analysis
-    await streamManager.startStream(streamId, params.drone_name, rtspUrl);
+    // 4. Register stream with StreamManager for frame analysis
+    await streamManager.startStream(streamId, params.drone_name, simulatedRtspUrl);
 
     return {
       stream_id: streamId,
-      rtsp_url: rtspUrl,
+      rtsp_url: simulatedRtspUrl,
       drone_name: params.drone_name,
       source_file: params.source_file
     };
-  }
-
-  public getAvailableVideos(): string[] {
-    if (!fs.existsSync(this.videosDir)) return [];
-    return fs.readdirSync(this.videosDir).filter((f) => f.toUpperCase().endsWith('.MP4'));
   }
 }
 

@@ -57,12 +57,12 @@ router.delete('/streams/:stream_id', async (req: Request, res: Response) => {
 });
 
 // GET /api/v1/simulations/videos - List available MP4 test videos
-router.get('/simulations/videos', (req: Request, res: Response) => {
+router.get('/simulations/videos', async (req: Request, res: Response) => {
   try {
-    const videos = rtspSimulator.getAvailableVideos();
+    const videos = await rtspSimulator.getAvailableVideos();
     res.json({ videos });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to list local simulation test videos' });
+    res.status(500).json({ error: 'Failed to list simulation test videos' });
   }
 });
 

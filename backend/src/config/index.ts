@@ -29,6 +29,7 @@ export const config = {
     region: process.env.GCP_REGION || 'us-central1',
     pubsubTopicAlerts: process.env.PUBSUB_TOPIC_ALERTS || 'dronewatch-urgent-alerts',
     gcsBucketMedia: process.env.GCS_BUCKET_MEDIA || 'dronewatch-media-archive',
-    gcsBucketSimulation: process.env.GCS_BUCKET_SIMULATION || 'dronewatch-simulation-videos'
+    gcsBucketSimulation: process.env.GCS_BUCKET_SIMULATION || 'dronewatch-simulation-videos',
+    gcsBucketName: process.env.GCS_BUCKET_NAME || 'dronewatch-clips-jal-dronewatch-prod'
   }
 };
