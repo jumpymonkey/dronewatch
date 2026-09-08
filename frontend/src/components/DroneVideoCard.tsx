@@ -124,13 +124,27 @@ export const DroneVideoCard: React.FC<DroneVideoCardProps> = ({
         {/* Fallback Simulation Banner if video offline */}
         {!isPlaying && (
           <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center p-4 text-center">
-            <Cpu className="w-8 h-8 text-cyan-500/60 mb-2 animate-spin" />
-            <p className="text-xs text-slate-400 font-mono">
-              Connecting RTSP Stream...
-            </p>
-            <p className="text-[10px] text-slate-500 mt-1 font-mono break-all px-4">
-              {stream.rtsp_url}
-            </p>
+            {stream.status === 'ERROR' ? (
+              <>
+                <ShieldAlert className="w-8 h-8 text-rose-500 mb-2 animate-pulse" />
+                <p className="text-xs text-rose-400 font-mono font-semibold">
+                  Stream Unreachable / Connection Failed
+                </p>
+                <p className="text-[10px] text-slate-400 mt-1 font-mono break-all px-4">
+                  {stream.rtsp_url}
+                </p>
+              </>
+            ) : (
+              <>
+                <Cpu className="w-8 h-8 text-cyan-500/60 mb-2 animate-spin" />
+                <p className="text-xs text-slate-400 font-mono">
+                  Connecting RTSP Stream...
+                </p>
+                <p className="text-[10px] text-slate-500 mt-1 font-mono break-all px-4">
+                  {stream.rtsp_url}
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>

@@ -64,7 +64,7 @@ class StreamManagerService {
     // Launch continuous FFmpeg HLS transcoding
     const playlistPath = path.join(streamHlsDir, 'index.m3u8');
     const hlsProcess = ffmpeg(rtspUrl)
-      .inputOptions(['-rtsp_transport tcp', '-analyzeduration 2000000', '-probesize 2000000'])
+      .inputOptions(['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 2000000', '-probesize 2000000'])
       .outputOptions([
         '-c:v libx264',
         '-preset ultrafast',
@@ -79,8 +79,13 @@ class StreamManagerService {
       .on('start', (cmd) => {
         console.log(`HLS FFmpeg started for [${droneName}]: ${cmd}`);
       })
-      .on('error', (err) => {
+      .on('error', async (err) => {
         console.error(`HLS FFmpeg transcoding error for [${droneName}]:`, err.message);
+        state.status = 'ERROR';
+        await query('UPDATE drone_streams SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE stream_id = $2', [
+          'ERROR',
+          streamId
+        ]);
       })
       .on('end', () => {
         console.log(`HLS FFmpeg process ended for [${droneName}]`);
@@ -143,7 +148,7 @@ class StreamManagerService {
     const framePath = path.join(this.framesDir, `frame_${state.streamId}.jpg`);
 
     ffmpeg(state.rtspUrl)
-      .inputOptions(['-rtsp_transport tcp', '-analyzeduration 1000000', '-probesize 1000000'])
+      .inputOptions(['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 1000000', '-probesize 1000000'])
       .outputOptions(['-vframes 1', '-q:v 2'])
       .output(framePath)
       .on('end', async () => {
