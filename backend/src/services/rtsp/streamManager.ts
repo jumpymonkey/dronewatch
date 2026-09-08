@@ -9,6 +9,7 @@ export interface ActiveStreamState {
   droneName: string;
   rtspUrl: string;
   ffmpegProcess?: ffmpeg.FfmpegCommand;
+  ffmpegHlsProcess?: ffmpeg.FfmpegCommand;
   status: 'ACTIVE' | 'INACTIVE' | 'RECONNECTING' | 'ERROR';
   lastFrameTime?: number;
   intervalTimer?: NodeJS.Timeout;
@@ -17,11 +18,17 @@ export interface ActiveStreamState {
 class StreamManagerService {
   private activeStreams: Map<string, ActiveStreamState> = new Map();
   private framesDir: string;
+  private hlsDir: string;
 
   constructor() {
     this.framesDir = path.resolve(process.cwd(), 'temp_frames');
+    this.hlsDir = path.resolve(process.cwd(), 'temp_hls');
+    
     if (!fs.existsSync(this.framesDir)) {
       fs.mkdirSync(this.framesDir, { recursive: true });
+    }
+    if (!fs.existsSync(this.hlsDir)) {
+      fs.mkdirSync(this.hlsDir, { recursive: true });
     }
   }
 
@@ -48,7 +55,41 @@ class StreamManagerService {
 
     console.log(`Starting RTSP stream processing for [${droneName}] -> ${rtspUrl}`);
 
-    // Set periodic frame extraction timer (1 frame every 3 seconds for Tier 1 background analysis)
+    // Create stream-specific HLS output directory
+    const streamHlsDir = path.join(this.hlsDir, streamId);
+    if (!fs.existsSync(streamHlsDir)) {
+      fs.mkdirSync(streamHlsDir, { recursive: true });
+    }
+
+    // Launch continuous FFmpeg HLS transcoding
+    const playlistPath = path.join(streamHlsDir, 'index.m3u8');
+    const hlsProcess = ffmpeg(rtspUrl)
+      .inputOptions(['-rtsp_transport tcp', '-analyzeduration 2000000', '-probesize 2000000'])
+      .outputOptions([
+        '-c:v libx264',
+        '-preset ultrafast',
+        '-tune zerolatency',
+        '-c:a aac',
+        '-f hls',
+        '-hls_time 2',
+        '-hls_list_size 5',
+        '-hls_flags delete_segments'
+      ])
+      .output(playlistPath)
+      .on('start', (cmd) => {
+        console.log(`HLS FFmpeg started for [${droneName}]: ${cmd}`);
+      })
+      .on('error', (err) => {
+        console.error(`HLS FFmpeg transcoding error for [${droneName}]:`, err.message);
+      })
+      .on('end', () => {
+        console.log(`HLS FFmpeg process ended for [${droneName}]`);
+      });
+
+    hlsProcess.run();
+    state.ffmpegHlsProcess = hlsProcess;
+
+    // Set periodic frame extraction timer (1 frame every 4 seconds for Gemini AI background analysis)
     state.intervalTimer = setInterval(() => {
       this.extractAndAnalyzeFrame(state);
     }, 4000);
@@ -62,11 +103,29 @@ class StreamManagerService {
       clearInterval(state.intervalTimer);
     }
 
+    if (state.ffmpegHlsProcess) {
+      try {
+        state.ffmpegHlsProcess.kill('SIGKILL');
+      } catch (e) {
+        // Ignore kill errors
+      }
+    }
+
     if (state.ffmpegProcess) {
       try {
         state.ffmpegProcess.kill('SIGKILL');
       } catch (e) {
         // Ignore kill errors
+      }
+    }
+
+    // Clean up HLS stream directory
+    const streamHlsDir = path.join(this.hlsDir, streamId);
+    if (fs.existsSync(streamHlsDir)) {
+      try {
+        fs.rmSync(streamHlsDir, { recursive: true, force: true });
+      } catch (e) {
+        console.warn(`Failed to cleanup HLS directory for ${streamId}:`, e);
       }
     }
 

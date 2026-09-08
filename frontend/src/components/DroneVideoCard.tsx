@@ -20,12 +20,8 @@ export const DroneVideoCard: React.FC<DroneVideoCardProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // Derive HLS streaming URL from MediaMTX
-  const pathKey = stream.source_file
-    ? stream.source_file.toLowerCase().replace(/[^a-z0-9]/g, '_')
-    : stream.drone_name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-
-  const hlsUrl = `http://localhost:8888/sim/${pathKey}/index.m3u8`;
+  // Derive HLS streaming URL from backend HLS service
+  const hlsUrl = `/hls/${stream.stream_id}/index.m3u8`;
 
   useEffect(() => {
     const video = videoRef.current;

@@ -16,12 +16,16 @@ app.use(express.json());
 // API v1 Router
 app.use('/api/v1', router);
 
+// Serve HLS Video Playlists and Segments
+const hlsPath = path.resolve(process.cwd(), 'temp_hls');
+app.use('/hls', express.static(hlsPath));
+
 // Serve Static Frontend Assets in Production
 const publicPath = path.join(__dirname, '../public');
 app.use(express.static(publicPath));
 
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+  if (req.path.startsWith('/api') || req.path.startsWith('/hls') || req.path.startsWith('/socket.io')) {
     return next();
   }
   res.sendFile(path.join(publicPath, 'index.html'), (err) => {
