@@ -8,7 +8,8 @@ export interface ActiveStreamState {
   streamId: string;
   droneName: string;
   rtspUrl: string;
-  ffmpegProcess?: ffmpeg.FfmpegCommand;
+  sourcePath?: string;
+  isSimulation: boolean;
   ffmpegHlsProcess?: ffmpeg.FfmpegCommand;
   status: 'ACTIVE' | 'INACTIVE' | 'RECONNECTING' | 'ERROR';
   lastFrameTime?: number;
@@ -23,7 +24,7 @@ class StreamManagerService {
   constructor() {
     this.framesDir = path.resolve(process.cwd(), 'temp_frames');
     this.hlsDir = path.resolve(process.cwd(), 'temp_hls');
-    
+
     if (!fs.existsSync(this.framesDir)) {
       fs.mkdirSync(this.framesDir, { recursive: true });
     }
@@ -32,16 +33,26 @@ class StreamManagerService {
     }
   }
 
-  public async startStream(streamId: string, droneName: string, rtspUrl: string): Promise<void> {
+  public async startStream(
+    streamId: string,
+    droneName: string,
+    rtspUrl: string,
+    options?: { isSimulation?: boolean; sourcePath?: string }
+  ): Promise<void> {
     if (this.activeStreams.has(streamId)) {
       console.log(`Stream ${streamId} (${droneName}) is already active.`);
       return;
     }
 
+    const isSimulation = options?.isSimulation || false;
+    const sourcePath = options?.sourcePath;
+
     const state: ActiveStreamState = {
       streamId,
       droneName,
       rtspUrl,
+      sourcePath,
+      isSimulation,
       status: 'ACTIVE'
     };
 
@@ -53,7 +64,8 @@ class StreamManagerService {
       streamId
     ]);
 
-    console.log(`Starting RTSP stream processing for [${droneName}] -> ${rtspUrl}`);
+    const inputSource = isSimulation && sourcePath ? sourcePath : rtspUrl;
+    console.log(`Starting stream processing for [${droneName}] (simulation: ${isSimulation}) -> ${inputSource}`);
 
     // Create stream-specific HLS output directory
     const streamHlsDir = path.join(this.hlsDir, streamId);
@@ -63,8 +75,13 @@ class StreamManagerService {
 
     // Launch continuous FFmpeg HLS transcoding
     const playlistPath = path.join(streamHlsDir, 'index.m3u8');
-    const hlsProcess = ffmpeg(rtspUrl)
-      .inputOptions(['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 2000000', '-probesize 2000000'])
+
+    const inputOptions = isSimulation
+      ? ['-stream_loop -1', '-re']
+      : ['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 2000000', '-probesize 2000000'];
+
+    const hlsProcess = ffmpeg(inputSource)
+      .inputOptions(inputOptions)
       .outputOptions([
         '-c:v libx264',
         '-preset ultrafast',
@@ -116,14 +133,6 @@ class StreamManagerService {
       }
     }
 
-    if (state.ffmpegProcess) {
-      try {
-        state.ffmpegProcess.kill('SIGKILL');
-      } catch (e) {
-        // Ignore kill errors
-      }
-    }
-
     // Clean up HLS stream directory
     const streamHlsDir = path.join(this.hlsDir, streamId);
     if (fs.existsSync(streamHlsDir)) {
@@ -141,14 +150,19 @@ class StreamManagerService {
       streamId
     ]);
 
-    console.log(`Stopped RTSP stream processing for [${state.droneName}]`);
+    console.log(`Stopped stream processing for [${state.droneName}]`);
   }
 
   private extractAndAnalyzeFrame(state: ActiveStreamState): void {
     const framePath = path.join(this.framesDir, `frame_${state.streamId}.jpg`);
 
-    ffmpeg(state.rtspUrl)
-      .inputOptions(['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 1000000', '-probesize 1000000'])
+    const inputSource = state.isSimulation && state.sourcePath ? state.sourcePath : state.rtspUrl;
+    const inputOptions = state.isSimulation
+      ? []
+      : ['-rtsp_transport tcp', '-timeout 5000000', '-analyzeduration 1000000', '-probesize 1000000'];
+
+    ffmpeg(inputSource)
+      .inputOptions(inputOptions)
       .outputOptions(['-vframes 1', '-q:v 2'])
       .output(framePath)
       .on('end', async () => {
@@ -164,7 +178,6 @@ class StreamManagerService {
         }
       })
       .on('error', (err) => {
-        // Soft error fallback if stream is starting up or packet dropped
         if (process.env.DEBUG === 'true') {
           console.warn(`Frame extraction warning for ${state.droneName}:`, err.message);
         }

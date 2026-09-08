@@ -1,4 +1,3 @@
-import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
 import fs from 'fs';
 import { Storage } from '@google-cloud/storage';
@@ -12,7 +11,6 @@ export interface SimulationLaunchParams {
 }
 
 class RtspSimulatorService {
-  private activeSimulations: Map<string, ffmpeg.FfmpegCommand> = new Map();
   private videosDir: string;
   private tempDir: string;
   private storage: Storage;
@@ -101,42 +99,11 @@ class RtspSimulatorService {
 
     const streamId = dbRes.rows[0].stream_id;
 
-    // 3. Launch continuous FFmpeg HLS transcoding for simulation video
-    if (!this.activeSimulations.has(streamId)) {
-      const hlsDir = path.resolve(process.cwd(), 'temp_hls', streamId);
-      if (!fs.existsSync(hlsDir)) {
-        fs.mkdirSync(hlsDir, { recursive: true });
-      }
-      const hlsOutput = path.join(hlsDir, 'index.m3u8');
-
-      console.log(`Starting FFmpeg HLS loop for simulation ${params.drone_name} using ${params.source_file}`);
-
-      const proc = ffmpeg(videoPath)
-        .inputOptions(['-stream_loop -1', '-re'])
-        .outputOptions([
-          '-c:v libx264',
-          '-preset ultrafast',
-          '-tune zerolatency',
-          '-c:a aac',
-          '-f hls',
-          '-hls_time 2',
-          '-hls_list_size 5',
-          '-hls_flags delete_segments'
-        ])
-        .output(hlsOutput)
-        .on('start', (cmd) => {
-          console.log(`FFmpeg HLS Simulation process started for ${params.drone_name}`);
-        })
-        .on('error', (err) => {
-          console.warn(`FFmpeg HLS Simulation notice for ${params.drone_name}:`, err.message);
-        });
-
-      proc.run();
-      this.activeSimulations.set(streamId, proc);
-    }
-
-    // 4. Register stream with StreamManager for frame analysis
-    await streamManager.startStream(streamId, params.drone_name, simulatedRtspUrl);
+    // 3. Register simulation stream with StreamManager to start HLS transcoding & frame analysis directly from the MP4 file
+    await streamManager.startStream(streamId, params.drone_name, simulatedRtspUrl, {
+      isSimulation: true,
+      sourcePath: videoPath
+    });
 
     return {
       stream_id: streamId,
