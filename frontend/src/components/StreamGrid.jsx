@@ -88,7 +88,9 @@ export default function StreamGrid({
                   Gemini Flash AI Vision
                 </span>
                 <span className="gemini-hud-time">
-                  {droneTelemetry?.timestamp
+                  {droneTelemetry?.video_timestamp_formatted
+                    ? `TC ${droneTelemetry.video_timestamp_formatted} • ${new Date(droneTelemetry.timestamp).toLocaleTimeString()}`
+                    : droneTelemetry?.timestamp
                     ? new Date(droneTelemetry.timestamp).toLocaleTimeString()
                     : 'Analyzing...'}
                 </span>

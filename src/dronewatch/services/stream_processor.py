@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 EventCallback = Callable[[IncidentEvent], Coroutine[Any, Any, None]]
 
 
+def format_video_timestamp(seconds: float | None) -> str | None:
+    """Format timestamp seconds into MM:SS or HH:MM:SS string format."""
+    if seconds is None or seconds < 0:
+        return None
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 class DroneStreamProcessor:
     """Ingests and processes drone video streams (RTSP or MP4 file)."""
 
@@ -86,7 +99,9 @@ class DroneStreamProcessor:
         max_concurrent_analysis: int = 3
         sample_interval: float = 1.0 / self.settings.frame_sampling_fps
 
-        async def _analyze_frame_task(frame_bytes_data: bytes) -> None:
+        async def _analyze_frame_task(
+            frame_bytes_data: bytes, video_timestamp_sec: float | None = None
+        ) -> None:
             try:
                 analysis = await self.analyzer.analyze_frame(
                     frame_bytes_data, mime_type="image/jpeg"
@@ -96,11 +111,14 @@ class DroneStreamProcessor:
                     or analysis.threat_level != ThreatLevel.NONE
                 )
 
+                formatted_timecode = format_video_timestamp(video_timestamp_sec)
+
                 if threat_active:
                     self.config.status = StreamStatus.ALERT
                     logger.warning(
-                        "DISPATCH ALERT from Drone %s: [%s] %s",
+                        "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s",
                         self.config.drone_id,
+                        formatted_timecode or "N/A",
                         analysis.threat_level,
                         analysis.summary,
                     )
@@ -117,6 +135,8 @@ class DroneStreamProcessor:
                     confidence_score=analysis.confidence_score,
                     bounding_boxes=analysis.bounding_boxes,
                     snapshot_uri=None,
+                    video_timestamp_seconds=video_timestamp_sec,
+                    video_timestamp_formatted=formatted_timecode,
                 )
 
                 if self.event_callback:
@@ -148,6 +168,7 @@ class DroneStreamProcessor:
 
                         if frame.time is not None and frame.time >= target_time:
                             img_bgr = frame.to_ndarray(format="bgr24")
+                            frame_time = float(frame.time)
                             target_time = frame.time + sample_interval
 
                             # Run motion filter
@@ -160,7 +181,9 @@ class DroneStreamProcessor:
                                 success, buffer = cv2.imencode(".jpg", img_bgr)
                                 if success:
                                     frame_data = buffer.tobytes()
-                                    task = asyncio.create_task(_analyze_frame_task(frame_data))
+                                    task = asyncio.create_task(
+                                        _analyze_frame_task(frame_data, frame_time)
+                                    )
                                     active_analysis_tasks.add(task)
 
                             await asyncio.sleep(sample_interval)
@@ -198,11 +221,13 @@ class DroneStreamProcessor:
             if (not ret or frame is None) and self.is_running:
                 cap.open(self.config.stream_url)
                 ret, frame = cap.read()
-            return ret, frame
+            pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+            pos_sec = pos_msec / 1000.0 if pos_msec > 0 else None
+            return ret, frame, pos_sec
 
         try:
             while self.is_running:
-                ret, frame = await asyncio.to_thread(_get_frame)
+                ret, frame, pos_sec = await asyncio.to_thread(_get_frame)
                 if not ret or frame is None or not self.is_running:
                     await asyncio.sleep(0.5)
                     continue
@@ -213,10 +238,13 @@ class DroneStreamProcessor:
                 if len(active_analysis_tasks) < max_concurrent_analysis:
                     success, buffer = cv2.imencode(".jpg", frame)
                     if success:
-                        task = asyncio.create_task(_analyze_frame_task(buffer.tobytes()))
+                        task = asyncio.create_task(
+                            _analyze_frame_task(buffer.tobytes(), pos_sec)
+                        )
                         active_analysis_tasks.add(task)
 
                 await asyncio.sleep(sample_interval)
+
 
         except asyncio.CancelledError:
             pass

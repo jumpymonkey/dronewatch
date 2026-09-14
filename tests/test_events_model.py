@@ -38,13 +38,18 @@ def test_incident_event_serialization() -> None:
         category=IncidentCategory.PERIMETER_BREACH,
         description="Person climbing perimeter fence.",
         confidence_score=0.94,
+        video_timestamp_seconds=102.5,
+        video_timestamp_formatted="01:42",
     )
     assert event.drone_id == "Drone-Alpha"
     assert event.threat_level == ThreatLevel.HIGH
     assert event.acknowledged_by_pilot is False
+    assert event.video_timestamp_seconds == 102.5
+    assert event.video_timestamp_formatted == "01:42"
 
     data = event.model_dump()
     assert data["drone_id"] == "Drone-Alpha"
+    assert data["video_timestamp_formatted"] == "01:42"
 
 
 def test_drone_stream_config_defaults() -> None:

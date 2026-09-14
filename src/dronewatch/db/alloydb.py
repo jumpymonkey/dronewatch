@@ -73,6 +73,8 @@ class AlloyDBManager:
                     confidence_score DOUBLE PRECISION NOT NULL,
                     bounding_boxes JSONB NOT NULL,
                     snapshot_uri TEXT,
+                    video_timestamp_seconds DOUBLE PRECISION,
+                    video_timestamp_formatted VARCHAR(32),
                     acknowledged_by_pilot BOOLEAN DEFAULT FALSE,
                     description_vector vector(768)
                 );
@@ -101,8 +103,11 @@ class AlloyDBManager:
                         INSERT INTO incident_events (
                             event_id, drone_id, timestamp, zone_name, latitude, longitude,
                             threat_level, category, description, confidence_score,
-                            bounding_boxes, snapshot_uri, acknowledged_by_pilot, description_vector
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            bounding_boxes, snapshot_uri, video_timestamp_seconds,
+                            video_timestamp_formatted, acknowledged_by_pilot, description_vector
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                        )
                         """,
                         event.event_id,
                         event.drone_id,
@@ -116,6 +121,8 @@ class AlloyDBManager:
                         event.confidence_score,
                         boxes_json,
                         event.snapshot_uri,
+                        event.video_timestamp_seconds,
+                        event.video_timestamp_formatted,
                         event.acknowledged_by_pilot,
                         vector_str,
                     )
@@ -149,7 +156,8 @@ class AlloyDBManager:
                             """
                             SELECT event_id, drone_id, timestamp, zone_name, latitude, longitude,
                                    threat_level, category, description, confidence_score,
-                                   bounding_boxes, snapshot_uri, acknowledged_by_pilot
+                                   bounding_boxes, snapshot_uri, video_timestamp_seconds,
+                                   video_timestamp_formatted, acknowledged_by_pilot
                             FROM incident_events
                             WHERE threat_level = $1
                             ORDER BY timestamp DESC
@@ -163,7 +171,8 @@ class AlloyDBManager:
                             """
                             SELECT event_id, drone_id, timestamp, zone_name, latitude, longitude,
                                    threat_level, category, description, confidence_score,
-                                   bounding_boxes, snapshot_uri, acknowledged_by_pilot
+                                   bounding_boxes, snapshot_uri, video_timestamp_seconds,
+                                   video_timestamp_formatted, acknowledged_by_pilot
                             FROM incident_events
                             ORDER BY timestamp DESC
                             LIMIT $1
@@ -188,10 +197,13 @@ class AlloyDBManager:
                                 confidence_score=r["confidence_score"],
                                 bounding_boxes=json.loads(r["bounding_boxes"]),
                                 snapshot_uri=r["snapshot_uri"],
+                                video_timestamp_seconds=r["video_timestamp_seconds"],
+                                video_timestamp_formatted=r["video_timestamp_formatted"],
                                 acknowledged_by_pilot=r["acknowledged_by_pilot"],
                             )
                         )
                     return events
+
             except Exception as err:
                 logger.error("AlloyDB query failed (%s). Falling back to local store.", err)
 

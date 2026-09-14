@@ -82,6 +82,12 @@ class IncidentEvent(BaseModel):
     snapshot_uri: str | None = Field(
         default=None, description="GCS URI or local path to frame snapshot image"
     )
+    video_timestamp_seconds: float | None = Field(
+        default=None, description="Video stream timestamp in seconds when event occurred"
+    )
+    video_timestamp_formatted: str | None = Field(
+        default=None, description="Formatted video playback timestamp e.g. 01:42"
+    )
     acknowledged_by_pilot: bool = Field(
         default=False, description="Whether pilot has acknowledged alert"
     )

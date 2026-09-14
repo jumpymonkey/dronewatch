@@ -39,12 +39,26 @@ export default function AlertSidebar({ alerts, onAcknowledge }) {
             <div key={alert.event_id} className={`alert-item ${alert.threat_level}`}>
               <div className="alert-item-header">
                 <span className="alert-drone-tag">{alert.drone_id}</span>
-                <span className="alert-time">
-                  {new Date(alert.timestamp).toLocaleTimeString()}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  {alert.video_timestamp_formatted && (
+                    <span className="video-timecode-tag" title="Video Stream Timecode">
+                      TC {alert.video_timestamp_formatted}
+                    </span>
+                  )}
+                  <span className="alert-time">
+                    {new Date(alert.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
               </div>
 
-              <p className="alert-description">{alert.description}</p>
+              <p className="alert-description">
+                {alert.video_timestamp_formatted && (
+                  <span className="timecode-pill">
+                    Video Marker: {alert.video_timestamp_formatted}
+                  </span>
+                )}
+                {alert.description}
+              </p>
 
               {!alert.acknowledged_by_pilot ? (
                 <button
