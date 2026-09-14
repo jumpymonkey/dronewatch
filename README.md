@@ -7,8 +7,7 @@ AI-Powered Multi-Drone Campus Surveillance & Real-Time Threat Detection System.
 - **Database:** AlloyDB for PostgreSQL with `pgvector` extension
 - **Backend:** FastAPI + WebSockets + Pydantic v2
 - **Pre-Filtering:** Motion pre-filter using OpenCV frame differencing
-- **Frontend:** React + Vite Pilot Alert Dashboard
-- **Deployment:** Cloud Run, Artifact Registry, GCS, Pub/Sub
+- **Deployment:** Cloud Run, Artifact Registry, Google Cloud Storage
 
 ## Quickstart
 ```bash

@@ -20,7 +20,6 @@ gcloud services enable \
     artifactregistry.googleapis.com \
     aiplatform.googleapis.com \
     alloydb.googleapis.com \
-    pubsub.googleapis.com \
     storage.googleapis.com \
     vpcaccess.googleapis.com \
     --project="${PROJECT_ID}"
