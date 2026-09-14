@@ -4,9 +4,9 @@
 FROM node:20-slim AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm install --include=dev
 COPY frontend/ ./
-RUN npm run build
+RUN npx vite build
 
 # Stage 2: Build Python environment
 FROM ghcr.io/astral-sh/uv:0.5.10-python3.12-bookworm-slim AS builder
