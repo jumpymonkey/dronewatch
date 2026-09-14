@@ -18,6 +18,8 @@ class Settings(BaseSettings):
         env_prefix="DRONEWATCH_",
         extra="forbid",
         case_sensitive=False,
+        env_file=".env",
+        env_file_encoding="utf-8",
     )
 
     # Application settings
@@ -26,8 +28,10 @@ class Settings(BaseSettings):
     debug: bool = Field(default=True)
 
     # Google Cloud Platform Settings
-    gcp_project_id: str = Field(default="jal-agentframework")
-    gcp_location: str = Field(default="us-central1")
+    gcp_project_id: str = Field(
+        default="your-gcp-project-id", description="GCP Project ID for Vertex AI / GenAI"
+    )
+    gcp_location: str = Field(default="us-central1", description="GCP Region")
     use_vertex_ai: bool = Field(default=True)
     gemini_model: str = Field(
         default="gemini-2.5-flash",
@@ -35,12 +39,16 @@ class Settings(BaseSettings):
     )
 
     # Storage & AlloyDB Settings
-    gcs_bucket_videos: str = Field(default="dronewatch-dronevideos-bucket")
-    gcs_bucket_snapshots: str = Field(default="dronewatch-snapshots-bucket")
+    gcs_bucket_videos: str = Field(
+        default="your-dronewatch-videos-bucket", description="GCS Bucket for video streams"
+    )
+    gcs_bucket_snapshots: str = Field(
+        default="your-dronewatch-snapshots-bucket", description="GCS Bucket for alert snapshots"
+    )
     alloydb_host: str | None = Field(default=None, description="AlloyDB PostgreSQL IP/Host")
     alloydb_port: int = Field(default=5432, description="AlloyDB PostgreSQL Port")
     alloydb_user: str = Field(default="postgres", description="AlloyDB User")
-    alloydb_password: str = Field(default="dronewatch123", description="AlloyDB Password")
+    alloydb_password: str = Field(default="CHANGE_ME_IN_PRODUCTION", description="AlloyDB Password")
     alloydb_database: str = Field(default="dronewatch_db", description="AlloyDB Database Name")
 
     # Video Stream Ingestion Parameters
