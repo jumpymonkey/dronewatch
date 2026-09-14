@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+frontend/node_modules/
+frontend/.vite/
+*.mp4
+*.MP4
+*.log

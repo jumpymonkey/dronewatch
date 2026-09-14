@@ -35,7 +35,11 @@ if ! gcloud artifacts repositories describe "${REPO_NAME}" --location="${REGION}
         --project="${PROJECT_ID}"
 fi
 
-# 3. Build container image using Cloud Build
+# 3. Compile React frontend production bundle
+echo "--> Compiling React frontend SPA bundle..."
+(cd frontend && npm run build)
+
+# 4. Build container image using Cloud Build
 echo "--> Building container image with Cloud Build..."
 gcloud builds submit --tag "${IMAGE_NAME}" --project="${PROJECT_ID}" .
 

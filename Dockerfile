@@ -1,14 +1,4 @@
-# Multi-stage production Dockerfile for DroneWatch on Cloud Run
-
-# Stage 1: Build React frontend
-FROM node:20-slim AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install --include=dev
-COPY frontend/ ./
-RUN npx vite build
-
-# Stage 2: Build Python environment
+# Production Dockerfile for DroneWatch on Cloud Run
 FROM ghcr.io/astral-sh/uv:0.5.10-python3.12-bookworm-slim AS builder
 
 WORKDIR /app
@@ -26,7 +16,7 @@ COPY src/ ./src/
 # Install python dependencies into virtual environment
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
-# Stage 3: Runtime container
+# Runtime container stage
 FROM python:3.12-slim-bookworm AS runner
 
 WORKDIR /app
@@ -40,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
-COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+COPY frontend/dist /app/frontend/dist
 
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
