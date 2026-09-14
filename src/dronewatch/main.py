@@ -85,41 +85,14 @@ async def broadcast_incident(event: IncidentEvent) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager initializing DB pool and default streams."""
+    """Application lifespan manager initializing DB pool."""
     logger.info("Initializing DroneWatch application lifespan...")
     await db_manager.connect()
-
-    # Pre-register default 2 drone streams (up to 4 supported)
-    default_drones = [
-        DroneStreamConfig(
-            drone_id="Drone-Alpha",
-            stream_url=settings.sample_video_path,
-            zone_name="North Perimeter Gate 3",
-            status=StreamStatus.ONLINE,
-        ),
-        DroneStreamConfig(
-            drone_id="Drone-Bravo",
-            stream_url=settings.sample_video_path,
-            zone_name="Executive Parking Garage B",
-            status=StreamStatus.ONLINE,
-        ),
-    ]
-
-    for config in default_drones:
-        active_streams[config.drone_id] = config
-        processor = DroneStreamProcessor(
-            config=config,
-            settings=settings,
-            analyzer=analyzer,
-            event_callback=broadcast_incident,
-        )
-        stream_processors[config.drone_id] = processor
-        await processor.start()
 
     yield
 
     logger.info("Shutting down DroneWatch application lifespan...")
-    for processor in stream_processors.values():
+    for processor in list(stream_processors.values()):
         await processor.stop()
     await db_manager.close()
 

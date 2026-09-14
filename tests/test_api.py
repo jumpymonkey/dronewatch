@@ -28,7 +28,6 @@ def test_list_streams_endpoint(client: TestClient) -> None:
     assert response.status_code == 200
     streams = response.json()
     assert isinstance(streams, list)
-    assert len(streams) >= 1
 
 
 def test_register_and_unregister_stream_endpoint(client: TestClient) -> None:

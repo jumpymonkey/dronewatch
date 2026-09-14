@@ -73,8 +73,8 @@ class DroneStreamProcessor:
         if self._task and not self._task.done():
             self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(self._task), timeout=0.5)
+            except (TimeoutError, asyncio.CancelledError):
                 pass
         logger.info("Stopped stream processor for drone %s", self.config.drone_id)
 
@@ -91,8 +91,10 @@ class DroneStreamProcessor:
             return
 
         def _get_frame():
+            if not self.is_running:
+                return False, None
             ret, frame = cap.read()
-            if not ret or frame is None:
+            if (not ret or frame is None) and self.is_running:
                 # Re-open stream target to seamlessly loop video files or recover RTSP feeds
                 cap.open(self.config.stream_url)
                 ret, frame = cap.read()
