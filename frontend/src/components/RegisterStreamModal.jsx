@@ -12,8 +12,13 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
   const handleFillSample = () => {
     setDroneId('Drone-S100');
     setZoneName('North Campus Patrol Route');
-    setStreamType('LOCAL');
-    setStreamUrl('/home/jeffleinen/jeffdev/dronevideos/videos/S1002353.MP4');
+    if (streamType === 'GCS') {
+      setStreamUrl('gs://jal-dronewatch-videos/S1002353.MP4');
+    } else if (streamType === 'RTSP') {
+      setStreamUrl('rtsp://192.168.1.100:554/stream1');
+    } else {
+      setStreamUrl('/home/jeffleinen/jeffdev/dronevideos/videos/S1002353.MP4');
+    }
   };
 
   const handleSubmit = (e) => {

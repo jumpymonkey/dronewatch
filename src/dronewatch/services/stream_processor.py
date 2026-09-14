@@ -144,11 +144,42 @@ class DroneStreamProcessor:
             except Exception as ex:
                 logger.error("Error in background frame analysis task: %s", ex)
 
-        # PyAV demuxer path for local files with multi-stream / attached-picture MP4s
-        if os.path.exists(self.config.stream_url) and os.path.isfile(self.config.stream_url):
-            logger.info("Using PyAV demuxer for video file: %s", self.config.stream_url)
+        # Resolve GCS gs:// path to local cached file if needed
+        local_video_path = self.config.stream_url
+        if self.config.stream_url.startswith("gs://"):
             try:
-                container = av.open(self.config.stream_url)
+                gcs_path = self.config.stream_url[5:]
+                parts = gcs_path.split("/", 1)
+                bucket_name = parts[0]
+                blob_name = parts[1] if len(parts) > 1 else ""
+
+                cache_dir = "/tmp/gcs_cache"
+                os.makedirs(cache_dir, exist_ok=True)
+                cached_file = os.path.join(
+                    cache_dir, f"{bucket_name}_{os.path.basename(blob_name)}"
+                )
+
+                if not os.path.exists(cached_file):
+                    logger.info(
+                        "Downloading GCS blob gs://%s/%s to cache...", bucket_name, blob_name
+                    )
+                    from google.cloud import storage
+
+                    storage_client = storage.Client(project=self.settings.gcp_project_id)
+                    bucket = storage_client.bucket(bucket_name)
+                    blob = bucket.blob(blob_name)
+                    await asyncio.to_thread(blob.download_to_filename, cached_file)
+                    logger.info("Downloaded GCS blob to %s", cached_file)
+
+                local_video_path = cached_file
+            except Exception as gcs_err:
+                logger.error("Failed to download GCS video %s: %s", self.config.stream_url, gcs_err)
+
+        # PyAV demuxer path for local files with multi-stream / attached-picture MP4s
+        if os.path.exists(local_video_path) and os.path.isfile(local_video_path):
+            logger.info("Using PyAV demuxer for video file: %s", local_video_path)
+            try:
+                container = av.open(local_video_path)
                 video_streams = [
                     s
                     for s in container.streams.video
@@ -194,7 +225,7 @@ class DroneStreamProcessor:
                             target_time = 0.0
                         except Exception:
                             container.close()
-                            container = av.open(self.config.stream_url)
+                            container = av.open(local_video_path)
                             target_time = 0.0
 
                 container.close()

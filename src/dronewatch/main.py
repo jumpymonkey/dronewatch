@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from dronewatch.config import get_settings
@@ -188,9 +189,20 @@ async def get_stream_video(drone_id: str) -> Any:
     config = active_streams[drone_id]
     stream_url = config.stream_url
 
-    # Serve local video file if path exists on disk
+    # Serve local video file or cached GCS file if path exists on disk
     if os.path.exists(stream_url) and os.path.isfile(stream_url):
         return FileResponse(path=stream_url, media_type="video/mp4")
+
+    if stream_url.startswith("gs://"):
+        gcs_path = stream_url[5:]
+        parts = gcs_path.split("/", 1)
+        bucket_name = parts[0]
+        blob_name = parts[1] if len(parts) > 1 else ""
+        cached_file = os.path.join(
+            "/tmp/gcs_cache", f"{bucket_name}_{os.path.basename(blob_name)}"
+        )
+        if os.path.exists(cached_file):
+            return FileResponse(path=cached_file, media_type="video/mp4")
 
     # Redirect to HTTP(S) URL if provided directly
     if stream_url.startswith("http://") or stream_url.startswith("https://"):
@@ -247,3 +259,14 @@ async def websocket_alerts_endpoint(websocket: WebSocket) -> None:
         logger.info("WebSocket pilot client disconnected.")
         if websocket in connected_websockets:
             connected_websockets.remove(websocket)
+
+
+# Static files mounting for single-container deployment on Cloud Run
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    static_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../frontend/dist")
+    )
+
+if os.path.exists(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
