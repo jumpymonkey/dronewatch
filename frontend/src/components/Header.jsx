@@ -11,7 +11,7 @@ export default function Header({ activeCount, onTriggerSim, onOpenRegisterModal 
         <div>
           <h1 className="logo-title">DroneWatch Command</h1>
           <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            Gemini 2.5 Flash Multi-Drone Patrol
+            Gemini 3.6 Flash Multi-Drone Patrol
           </p>
         </div>
       </div>
@@ -24,7 +24,7 @@ export default function Header({ activeCount, onTriggerSim, onOpenRegisterModal 
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--accent-cyan)' }}>
           <Cpu size={16} />
-          <span>Gemini 2.5 Flash</span>
+          <span>Gemini 3.6 Flash</span>
         </div>
 
         <button className="btn-primary" onClick={onOpenRegisterModal} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>

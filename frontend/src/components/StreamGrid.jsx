@@ -97,7 +97,7 @@ export default function StreamGrid({
               <div className="gemini-hud-body">
                 <Eye size={13} className="hud-eye-icon" />
                 <span className="hud-description">
-                  {droneTelemetry?.description || 'Evaluating video stream with Gemini 2.5 Flash...'}
+                  {droneTelemetry?.description || 'Evaluating video stream with Gemini 3.6 Flash...'}
                 </span>
               </div>
             </div>

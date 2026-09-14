@@ -1,4 +1,4 @@
-"""Multimodal video frame analyzer powered by Google GenAI (Gemini 2.5 Flash)."""
+"""Multimodal video frame analyzer powered by Google GenAI (Gemini 3.6 Flash)."""
 
 import asyncio
 import logging

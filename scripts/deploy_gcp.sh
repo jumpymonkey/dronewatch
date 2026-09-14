@@ -45,7 +45,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --platform=managed \
     --region="${REGION}" \
     --allow-unauthenticated \
-    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=${REGION},DRONEWATCH_GEMINI_MODEL=gemini-2.5-flash,DRONEWATCH_ENVIRONMENT=production" \
+    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=${REGION},DRONEWATCH_GEMINI_MODEL=gemini-3.6-flash,DRONEWATCH_ENVIRONMENT=production" \
     --min-instances=1 \
     --cpu=2 \
     --memory=4Gi \
