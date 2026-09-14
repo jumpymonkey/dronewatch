@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from typing import Any
 
+import av
 import cv2
 
 from dronewatch.config import Settings
@@ -80,28 +82,9 @@ class DroneStreamProcessor:
 
     async def _process_loop(self) -> None:
         """Main frame extraction and analysis loop."""
-
-        def _open_cap():
-            return cv2.VideoCapture(self.config.stream_url)
-
-        cap = await asyncio.to_thread(_open_cap)
-        if not cap.isOpened():
-            logger.error("Failed to open stream target: %s", self.config.stream_url)
-            self.config.status = StreamStatus.OFFLINE
-            return
-
-        def _get_frame():
-            if not self.is_running:
-                return False, None
-            ret, frame = cap.read()
-            if (not ret or frame is None) and self.is_running:
-                # Re-open stream target to seamlessly loop video files or recover RTSP feeds
-                cap.open(self.config.stream_url)
-                ret, frame = cap.read()
-            return ret, frame
-
         active_analysis_tasks: set[asyncio.Task[None]] = set()
         max_concurrent_analysis: int = 3
+        sample_interval: float = 1.0 / self.settings.frame_sampling_fps
 
         async def _analyze_frame_task(frame_bytes_data: bytes) -> None:
             try:
@@ -141,6 +124,82 @@ class DroneStreamProcessor:
             except Exception as ex:
                 logger.error("Error in background frame analysis task: %s", ex)
 
+        # PyAV demuxer path for local files with multi-stream / attached-picture MP4s
+        if os.path.exists(self.config.stream_url) and os.path.isfile(self.config.stream_url):
+            logger.info("Using PyAV demuxer for video file: %s", self.config.stream_url)
+            try:
+                container = av.open(self.config.stream_url)
+                video_streams = [
+                    s
+                    for s in container.streams.video
+                    if s.codec_context and s.codec_context.name != "mjpeg"
+                ]
+                video_stream = max(
+                    video_streams or container.streams.video,
+                    key=lambda s: s.width * s.height,
+                )
+
+                target_time = 0.0
+
+                while self.is_running:
+                    for frame in container.decode(video_stream):
+                        if not self.is_running:
+                            break
+
+                        if frame.time is not None and frame.time >= target_time:
+                            img_bgr = frame.to_ndarray(format="bgr24")
+                            target_time = frame.time + sample_interval
+
+                            # Run motion filter
+                            self.motion_filter.process_frame(img_bgr)
+
+                            active_analysis_tasks = {
+                                t for t in active_analysis_tasks if not t.done()
+                            }
+                            if len(active_analysis_tasks) < max_concurrent_analysis:
+                                success, buffer = cv2.imencode(".jpg", img_bgr)
+                                if success:
+                                    frame_data = buffer.tobytes()
+                                    task = asyncio.create_task(_analyze_frame_task(frame_data))
+                                    active_analysis_tasks.add(task)
+
+                            await asyncio.sleep(sample_interval)
+
+                    if self.is_running:
+                        try:
+                            container.seek(0)
+                            target_time = 0.0
+                        except Exception:
+                            container.close()
+                            container = av.open(self.config.stream_url)
+                            target_time = 0.0
+
+                container.close()
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception as pyav_err:
+                logger.warning("PyAV demuxer error: %s. Falling back to OpenCV.", pyav_err)
+
+        # OpenCV fallback path for RTSP / HTTP live feeds
+        def _open_cap():
+            return cv2.VideoCapture(self.config.stream_url)
+
+        cap = await asyncio.to_thread(_open_cap)
+        if not cap.isOpened():
+            logger.error("Failed to open stream target: %s", self.config.stream_url)
+            self.config.status = StreamStatus.OFFLINE
+            return
+
+        def _get_frame():
+            if not self.is_running:
+                return False, None
+            ret, frame = cap.read()
+            if (not ret or frame is None) and self.is_running:
+                cap.open(self.config.stream_url)
+                ret, frame = cap.read()
+            return ret, frame
+
         try:
             while self.is_running:
                 ret, frame = await asyncio.to_thread(_get_frame)
@@ -148,21 +207,16 @@ class DroneStreamProcessor:
                     await asyncio.sleep(0.5)
                     continue
 
-                # Run motion filter
-                has_motion, _ = self.motion_filter.process_frame(frame)
-
-                # Clean up finished tasks from previous iterations
+                self.motion_filter.process_frame(frame)
                 active_analysis_tasks = {t for t in active_analysis_tasks if not t.done()}
 
                 if len(active_analysis_tasks) < max_concurrent_analysis:
                     success, buffer = cv2.imencode(".jpg", frame)
                     if success:
-                        frame_bytes: bytes = buffer.tobytes()
-                        task = asyncio.create_task(_analyze_frame_task(frame_bytes))
+                        task = asyncio.create_task(_analyze_frame_task(buffer.tobytes()))
                         active_analysis_tasks.add(task)
 
-                # Throttle frame extraction rate according to configured sampling FPS
-                await asyncio.sleep(1.0 / self.settings.frame_sampling_fps)
+                await asyncio.sleep(sample_interval)
 
         except asyncio.CancelledError:
             pass
