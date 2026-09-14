@@ -3,7 +3,7 @@
 AI-Powered Multi-Drone Campus Surveillance & Real-Time Threat Detection System.
 
 ## Architecture
-- **Inference Model:** Gemini 3.6 Flash (`gemini-3.6-flash`) via Google GenAI / Vertex AI SDK
+- **Inference Model:** Gemini 2.5 Flash (`gemini-2.5-flash`) via Google GenAI / Vertex AI SDK
 - **Database:** AlloyDB for PostgreSQL with `pgvector` extension
 - **Backend:** FastAPI + WebSockets + Pydantic v2
 - **Pre-Filtering:** Motion pre-filter using OpenCV frame differencing

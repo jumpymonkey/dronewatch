@@ -1,7 +1,7 @@
 [project]
 name = "dronewatch"
 version = "0.1.0"
-description = "AI-Powered Multi-Drone Campus Video Analysis & Alerting System using Gemini 3.6 Flash and AlloyDB"
+description = "AI-Powered Multi-Drone Campus Video Analysis & Alerting System using Gemini 2.5 Flash and AlloyDB"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

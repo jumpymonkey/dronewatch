@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
-    description="Multi-Drone Video Analysis & Alerting System using Gemini 3.6 Flash and AlloyDB",
+    description="Multi-Drone Video Analysis & Alerting System using Gemini 2.5 Flash and AlloyDB",
     lifespan=lifespan,
 )
 

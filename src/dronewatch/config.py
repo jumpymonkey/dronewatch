@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     gcp_location: str = Field(default="us-central1", description="GCP Region")
     use_vertex_ai: bool = Field(default=True)
     gemini_model: str = Field(
-        default="gemini-3.6-flash",
+        default="gemini-2.5-flash",
         description="Gemini model version for video analysis",
     )
 

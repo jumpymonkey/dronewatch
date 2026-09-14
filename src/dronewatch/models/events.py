@@ -101,7 +101,7 @@ class DroneStreamConfig(BaseModel):
 
 
 class AnalysisResult(BaseModel):
-    """Structured response schema for Gemini 3.6 Flash multimodal outputs."""
+    """Structured response schema for Gemini 2.5 Flash multimodal outputs."""
 
     model_config = ConfigDict(extra="forbid")
 
