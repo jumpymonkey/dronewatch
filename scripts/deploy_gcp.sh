@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # GCP Deployment Script for DroneWatch Service on Cloud Run
-PROJECT_ID="${GCP_PROJECT_ID:-jal-dronewatch}"
+PROJECT_ID="${GCP_PROJECT_ID:-<YOUR_GCP_PROJECT_ID>}"
 REGION="${GCP_REGION:-us-central1}"
 SERVICE_NAME="dronewatch-backend"
 REPO_NAME="dronewatch-repo"
@@ -42,7 +42,7 @@ echo "--> Compiling React frontend SPA bundle..."
 echo "--> Building container image with Cloud Build..."
 gcloud builds submit --tag "${IMAGE_NAME}" --project="${PROJECT_ID}" .
 
-# 4. Deploy service to Cloud Run with Direct VPC egress to AlloyDB
+# 5. Deploy service to Cloud Run with Direct VPC egress to AlloyDB
 echo "--> Deploying to Cloud Run..."
 gcloud run deploy "${SERVICE_NAME}" \
     --image="${IMAGE_NAME}" \
@@ -52,7 +52,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --network=dronewatch-vpc-prod \
     --subnet=dronewatch-subnet-us-central1-prod \
     --vpc-egress=all-traffic \
-    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=${REGION},DRONEWATCH_GEMINI_MODEL=gemini-3.6-flash,DRONEWATCH_ENVIRONMENT=production,DRONEWATCH_ALLOYDB_HOST=10.208.115.2,DRONEWATCH_ALLOYDB_PORT=5432,DRONEWATCH_ALLOYDB_DB=postgres,DRONEWATCH_ALLOYDB_USER=postgres,DRONEWATCH_ALLOYDB_PASSWORD=dronewatch_pass_2026" \
+    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=global,DRONEWATCH_GEMINI_MODEL=gemini-3.6-flash,DRONEWATCH_ENVIRONMENT=production,DRONEWATCH_ALLOYDB_HOST=${ALLOYDB_HOST:-10.0.0.2},DRONEWATCH_ALLOYDB_PORT=5432,DRONEWATCH_ALLOYDB_DB=dronewatch_db,DRONEWATCH_ALLOYDB_USER=postgres,DRONEWATCH_ALLOYDB_PASSWORD=${ALLOYDB_PASSWORD}" \
     --min-instances=1 \
     --cpu=2 \
     --memory=4Gi \
