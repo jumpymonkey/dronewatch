@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Google Cloud Platform Settings
     gcp_project_id: str = Field(
-        default="jal-dronewatch", description="GCP Project ID for Vertex AI / GenAI"
+        default="dronewatch-project", description="GCP Project ID for Vertex AI / GenAI"
     )
     gcp_location: str = Field(default="global", description="GCP Region")
     use_vertex_ai: bool = Field(default=True)
@@ -40,10 +40,10 @@ class Settings(BaseSettings):
 
     # Storage & AlloyDB Settings
     gcs_bucket_videos: str = Field(
-        default="jal-dronewatch-videos", description="GCS Bucket for video streams"
+        default="dronewatch-videos-bucket", description="GCS Bucket for video streams"
     )
     gcs_bucket_snapshots: str = Field(
-        default="jal-dronewatch-snapshots", description="GCS Bucket for alert snapshots"
+        default="dronewatch-snapshots-bucket", description="GCS Bucket for alert snapshots"
     )
     alloydb_host: str | None = Field(default=None, description="AlloyDB PostgreSQL IP/Host")
     alloydb_port: int = Field(default=5432, description="AlloyDB PostgreSQL Port")

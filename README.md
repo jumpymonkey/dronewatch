@@ -69,8 +69,8 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 │          ▼                                                                                             │
 │   ┌───────────────────────────────┐        ┌──────────────────────────────┐                            │
 │   │ AlloyDB for PostgreSQL        │        │ Cloud Storage (GCS)          │                            │
-│   │ - pgvector Extension          │        │ - jal-dronewatch-videos      │                            │
-│   │ - Incident Event Persistence  │        │ - jal-dronewatch-snapshots   │                            │
+│   │ - pgvector Extension          │        │ - <YOUR_GCP_PROJECT_ID>-videos│                            │
+│   │ - Incident Event Persistence  │        │ - <YOUR_GCP_PROJECT_ID>-snaps │                            │
 │   └───────────────────────────────┘        └──────────────────────────────┘                            │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```

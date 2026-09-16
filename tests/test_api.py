@@ -84,7 +84,7 @@ def test_get_stream_video_gcs_fallback(client: TestClient) -> None:
     """Test GET /api/streams/{drone_id}/video redirects safely when GCS file is not yet cached."""
     payload = {
         "drone_id": "Drone-GCS-Test",
-        "stream_url": "gs://jal-dronewatch-videos/nonexistent.MP4",
+        "stream_url": "gs://dronewatch-videos-bucket/nonexistent.MP4",
         "zone_name": "GCS Zone",
     }
     client.post("/api/streams", json=payload)
