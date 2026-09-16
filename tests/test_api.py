@@ -78,3 +78,16 @@ def test_get_incidents_endpoint(client: TestClient) -> None:
     response = client.get("/api/incidents")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_get_stream_video_gcs_fallback(client: TestClient) -> None:
+    """Test GET /api/streams/{drone_id}/video redirects safely when GCS file is not yet cached."""
+    payload = {
+        "drone_id": "Drone-GCS-Test",
+        "stream_url": "gs://jal-dronewatch-videos/nonexistent.MP4",
+        "zone_name": "GCS Zone",
+    }
+    client.post("/api/streams", json=payload)
+    video_response = client.get("/api/streams/Drone-GCS-Test/video", follow_redirects=False)
+    assert video_response.status_code == 307
+    client.delete("/api/streams/Drone-GCS-Test")

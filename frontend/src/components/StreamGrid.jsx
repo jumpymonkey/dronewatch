@@ -15,7 +15,8 @@ export default function StreamGrid({
     if (stream.stream_url && (stream.stream_url.startsWith('http://') || stream.stream_url.startsWith('https://'))) {
       return stream.stream_url;
     }
-    return `/api/streams/${encodeURIComponent(stream.drone_id)}/video`;
+    const streamParam = stream.stream_url ? `?stream_url=${encodeURIComponent(stream.stream_url)}` : '';
+    return `/api/streams/${encodeURIComponent(stream.drone_id)}/video${streamParam}`;
   };
 
   return (
@@ -71,14 +72,33 @@ export default function StreamGrid({
             </div>
 
             {/* Live Drone Video Feed Visualizer */}
-            <video
-              className="video-player"
-              src={getVideoSource(stream)}
-              autoPlay
-              loop
-              muted
-              playsInline
-            />
+            {stream.stream_url?.toLowerCase().startsWith('rtsp://') ? (
+              <img
+                className="video-player"
+                src={getVideoSource(stream)}
+                alt={stream.drone_id}
+                onError={(e) => {
+                  const img = e.target;
+                  if (img && !img.dataset.retrying) {
+                    img.dataset.retrying = 'true';
+                    setTimeout(() => {
+                      delete img.dataset.retrying;
+                      const base = getVideoSource(stream);
+                      img.src = `${base}${base.includes('?') ? '&' : '?'}_t=${Date.now()}`;
+                    }, 1500);
+                  }
+                }}
+              />
+            ) : (
+              <video
+                className="video-player"
+                src={getVideoSource(stream)}
+                autoPlay
+                loop
+                muted
+                playsInline
+              />
+            )}
 
             {/* Live Gemini AI Telemetry HUD Banner */}
             <div className="gemini-hud-banner">

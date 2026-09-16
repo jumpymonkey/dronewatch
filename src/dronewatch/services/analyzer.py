@@ -87,8 +87,6 @@ Output strictly formatted JSON following this schema:
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
         models_to_try = [self.model_name]
-        if "2.5-flash" not in self.model_name:
-            models_to_try.append("gemini-2.5-flash")
 
         last_error: Exception | None = None
         for model in models_to_try:

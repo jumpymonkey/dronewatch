@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from typing import Any
@@ -39,6 +40,90 @@ def format_video_timestamp(seconds: float | None) -> str | None:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def get_gcs_cache_path(stream_url: str) -> str | None:
+    """Return local cache path for a GCS URL if file exists and is non-empty."""
+    if not stream_url.startswith("gs://"):
+        return None
+    gcs_path = stream_url[5:]
+    parts = gcs_path.split("/", 1)
+    bucket_name = parts[0]
+    blob_name = parts[1] if len(parts) > 1 else ""
+    cached_file = os.path.join("/tmp/gcs_cache", f"{bucket_name}_{os.path.basename(blob_name)}")
+    if os.path.exists(cached_file) and os.path.getsize(cached_file) > 0:
+        return cached_file
+    return None
+
+
+def cleanup_gcs_cache(keep_file: str | None = None) -> None:
+    """Clean up older cached video files in /tmp/gcs_cache to free RAM in Cloud Run."""
+    cache_dir = "/tmp/gcs_cache"
+    if not os.path.exists(cache_dir):
+        return
+    try:
+        for fname in os.listdir(cache_dir):
+            fpath = os.path.join(cache_dir, fname)
+            if os.path.isfile(fpath) and fpath != keep_file:
+                try:
+                    os.remove(fpath)
+                    logger.info("Purged older cached video file to free memory: %s", fpath)
+                except Exception as ex:
+                    logger.warning("Could not remove cache file %s: %s", fpath, ex)
+    except Exception as ex:
+        logger.warning("Cache cleanup error: %s", ex)
+
+
+def ensure_gcs_cached(stream_url: str, gcp_project_id: str = "") -> str | None:
+    """Download GCS blob gs://bucket/path to local cache if missing or 0 bytes."""
+    if not stream_url.startswith("gs://"):
+        return None
+
+    gcs_path = stream_url[5:]
+    parts = gcs_path.split("/", 1)
+    bucket_name = parts[0]
+    blob_name = parts[1] if len(parts) > 1 else ""
+
+    cache_dir = "/tmp/gcs_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_file = os.path.join(cache_dir, f"{bucket_name}_{os.path.basename(blob_name)}")
+    temp_file = f"{cached_file}.tmp"
+
+    if not os.path.exists(cached_file) or os.path.getsize(cached_file) == 0:
+        # Purge older cached files to keep /tmp memory usage minimal
+        cleanup_gcs_cache(keep_file=cached_file)
+
+        if os.path.exists(temp_file):
+            for _ in range(30):
+                if os.path.exists(cached_file) and os.path.getsize(cached_file) > 0:
+                    return cached_file
+                time.sleep(0.5)
+
+        try:
+            logger.info("Downloading GCS blob gs://%s/%s to cache...", bucket_name, blob_name)
+            from google.cloud import storage
+
+            storage_client = storage.Client(project=gcp_project_id or None)
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.download_to_filename(temp_file)
+            os.replace(temp_file, cached_file)
+            logger.info("Downloaded GCS blob to %s", cached_file)
+        except Exception as ex:
+            logger.error("Failed to download GCS video %s: %s", stream_url, ex)
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+            if os.path.exists(cached_file) and os.path.getsize(cached_file) == 0:
+                try:
+                    os.remove(cached_file)
+                except Exception:
+                    pass
+            return None
+
+    return cached_file
+
+
 class DroneStreamProcessor:
     """Ingests and processes drone video streams (RTSP or MP4 file)."""
 
@@ -58,6 +143,8 @@ class DroneStreamProcessor:
             event_callback: Async callback invoked when an incident event is logged.
         """
         self.config: DroneStreamConfig = config
+        if self.config.stream_url and self.config.stream_url.lower().startswith("rtsp://"):
+            self.config.stream_url = "rtsp://" + self.config.stream_url.strip()[7:]
         self.settings: Settings = settings
         self.analyzer: GeminiVideoAnalyzer = analyzer
         self.event_callback: EventCallback | None = event_callback
@@ -67,6 +154,7 @@ class DroneStreamProcessor:
         )
         self.is_running: bool = False
         self._task: asyncio.Task[None] | None = None
+        self.latest_frame_bytes: bytes | None = None
 
     async def start(self) -> None:
         """Start the stream processing background task."""
@@ -147,33 +235,11 @@ class DroneStreamProcessor:
         # Resolve GCS gs:// path to local cached file if needed
         local_video_path = self.config.stream_url
         if self.config.stream_url.startswith("gs://"):
-            try:
-                gcs_path = self.config.stream_url[5:]
-                parts = gcs_path.split("/", 1)
-                bucket_name = parts[0]
-                blob_name = parts[1] if len(parts) > 1 else ""
-
-                cache_dir = "/tmp/gcs_cache"
-                os.makedirs(cache_dir, exist_ok=True)
-                cached_file = os.path.join(
-                    cache_dir, f"{bucket_name}_{os.path.basename(blob_name)}"
-                )
-
-                if not os.path.exists(cached_file):
-                    logger.info(
-                        "Downloading GCS blob gs://%s/%s to cache...", bucket_name, blob_name
-                    )
-                    from google.cloud import storage
-
-                    storage_client = storage.Client(project=self.settings.gcp_project_id)
-                    bucket = storage_client.bucket(bucket_name)
-                    blob = bucket.blob(blob_name)
-                    await asyncio.to_thread(blob.download_to_filename, cached_file)
-                    logger.info("Downloaded GCS blob to %s", cached_file)
-
-                local_video_path = cached_file
-            except Exception as gcs_err:
-                logger.error("Failed to download GCS video %s: %s", self.config.stream_url, gcs_err)
+            cached_path = await asyncio.to_thread(
+                ensure_gcs_cached, self.config.stream_url, self.settings.gcp_project_id
+            )
+            if cached_path:
+                local_video_path = cached_path
 
         # PyAV demuxer path for local files with multi-stream / attached-picture MP4s
         if os.path.exists(local_video_path) and os.path.isfile(local_video_path):
@@ -203,19 +269,28 @@ class DroneStreamProcessor:
                             target_time = frame.time + sample_interval
 
                             # Run motion filter
-                            self.motion_filter.process_frame(img_bgr)
+                            has_motion, motion_score = self.motion_filter.process_frame(img_bgr)
 
-                            active_analysis_tasks = {
-                                t for t in active_analysis_tasks if not t.done()
-                            }
-                            if len(active_analysis_tasks) < max_concurrent_analysis:
-                                success, buffer = cv2.imencode(".jpg", img_bgr)
-                                if success:
-                                    frame_data = buffer.tobytes()
-                                    task = asyncio.create_task(
-                                        _analyze_frame_task(frame_data, frame_time)
+                            success, buffer = cv2.imencode(".jpg", img_bgr)
+                            if success:
+                                frame_data = buffer.tobytes()
+                                self.latest_frame_bytes = frame_data
+
+                                if has_motion:
+                                    active_analysis_tasks = {
+                                        t for t in active_analysis_tasks if not t.done()
+                                    }
+                                    if len(active_analysis_tasks) < max_concurrent_analysis:
+                                        task = asyncio.create_task(
+                                            _analyze_frame_task(frame_data, frame_time)
+                                        )
+                                        active_analysis_tasks.add(task)
+                                else:
+                                    logger.debug(
+                                        "Motion filter skipped static frame for drone %s at TC %s",
+                                        self.config.drone_id,
+                                        frame_time,
                                     )
-                                    active_analysis_tasks.add(task)
 
                             await asyncio.sleep(sample_interval)
 
@@ -237,7 +312,9 @@ class DroneStreamProcessor:
 
         # OpenCV fallback path for RTSP / HTTP live feeds
         def _open_cap():
-            return cv2.VideoCapture(self.config.stream_url)
+            cap = cv2.VideoCapture(self.config.stream_url)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            return cap
 
         cap = await asyncio.to_thread(_open_cap)
         if not cap.isOpened():
@@ -247,35 +324,47 @@ class DroneStreamProcessor:
 
         def _get_frame():
             if not self.is_running:
-                return False, None
+                return False, None, None
             ret, frame = cap.read()
             if (not ret or frame is None) and self.is_running:
                 cap.open(self.config.stream_url)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 ret, frame = cap.read()
             pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
             pos_sec = pos_msec / 1000.0 if pos_msec > 0 else None
             return ret, frame, pos_sec
 
+        last_ai_time = 0.0
         try:
             while self.is_running:
                 ret, frame, pos_sec = await asyncio.to_thread(_get_frame)
                 if not ret or frame is None or not self.is_running:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                     continue
 
-                self.motion_filter.process_frame(frame)
-                active_analysis_tasks = {t for t in active_analysis_tasks if not t.done()}
+                success, buffer = cv2.imencode(".jpg", frame)
+                if success:
+                    frame_data = buffer.tobytes()
+                    self.latest_frame_bytes = frame_data
 
-                if len(active_analysis_tasks) < max_concurrent_analysis:
-                    success, buffer = cv2.imencode(".jpg", frame)
-                    if success:
-                        task = asyncio.create_task(
-                            _analyze_frame_task(buffer.tobytes(), pos_sec)
-                        )
-                        active_analysis_tasks.add(task)
+                    now = time.time()
+                    if now - last_ai_time >= sample_interval:
+                        last_ai_time = now
+                        has_motion, motion_score = self.motion_filter.process_frame(frame)
+                        if has_motion:
+                            active_analysis_tasks = {
+                                t for t in active_analysis_tasks if not t.done()
+                            }
+                            if len(active_analysis_tasks) < max_concurrent_analysis:
+                                task = asyncio.create_task(_analyze_frame_task(frame_data, pos_sec))
+                                active_analysis_tasks.add(task)
+                        else:
+                            logger.debug(
+                                "Motion filter skipped static frame for drone %s",
+                                self.config.drone_id,
+                            )
 
-                await asyncio.sleep(sample_interval)
-
+                await asyncio.sleep(0.01)
 
         except asyncio.CancelledError:
             pass
