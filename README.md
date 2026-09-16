@@ -70,7 +70,7 @@ Environment variables are loaded via `pydantic-settings` from `.env`:
 
 | Variable | Default Value | Description |
 |---|---|---|
-| `DRONEWATCH_GCP_PROJECT_ID` | `jal-dronewatch` | Google Cloud project ID for Vertex AI |
+| `DRONEWATCH_GCP_PROJECT_ID` | `<YOUR_GCP_PROJECT_ID>` | Google Cloud project ID for Vertex AI |
 | `DRONEWATCH_GCP_LOCATION` | `global` | Vertex AI regional endpoint location |
 | `DRONEWATCH_GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model version for vision analysis |
 | `DRONEWATCH_USE_VERTEX_AI` | `true` | Enable Vertex AI client initialization |
