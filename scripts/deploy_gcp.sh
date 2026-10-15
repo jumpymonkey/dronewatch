@@ -21,6 +21,7 @@ gcloud services enable \
     run.googleapis.com \
     artifactregistry.googleapis.com \
     aiplatform.googleapis.com \
+    alloydb.googleapis.com \
     storage.googleapis.com \
     vpcaccess.googleapis.com \
     --project="${PROJECT_ID}"
@@ -39,6 +40,13 @@ if [[ -n "${GEMMA_SERVICE_URL}" ]]; then
 else
     echo "--> Tier 1 Gemma service not detected. Deploying with Tier 1 disabled."
 fi
+
+# AlloyDB Configuration
+ALLOYDB_HOST="${ALLOYDB_HOST:-10.208.115.2}"
+ALLOYDB_PORT="${ALLOYDB_PORT:-5432}"
+ALLOYDB_DATABASE="${ALLOYDB_DATABASE:-postgres}"
+ALLOYDB_USER="${ALLOYDB_USER:-postgres}"
+ALLOYDB_PASSWORD="${ALLOYDB_PASSWORD:-dronewatch_pass_2026}"
 
 # 3. Create Artifact Registry Docker repository if not exists
 echo "--> Verifying Artifact Registry repository..."
@@ -72,7 +80,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --network=dronewatch-vpc-prod \
     --subnet=dronewatch-subnet-us-central1-prod \
     --vpc-egress=private-ranges-only \
-    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=global,DRONEWATCH_GEMINI_MODEL=gemini-3.6-flash,DRONEWATCH_ENVIRONMENT=production,DRONEWATCH_GCS_BUCKET_VIDEOS=jal-dronewatch-videos,DRONEWATCH_GCS_BUCKET_SNAPSHOTS=jal-dronewatch-snapshots,DRONEWATCH_ENABLE_TIER1_GEMMA=${ENABLE_TIER1},DRONEWATCH_GEMMA_SERVICE_URL=${GEMMA_SERVICE_URL},DRONEWATCH_GEMMA_MODEL_NAME=google/gemma-4-E2B-it" \
+    --set-env-vars="DRONEWATCH_GCP_PROJECT_ID=${PROJECT_ID},GCP_PROJECT_ID=${PROJECT_ID},DRONEWATCH_GCP_LOCATION=global,DRONEWATCH_GEMINI_MODEL=gemini-3.6-flash,DRONEWATCH_ENVIRONMENT=production,DRONEWATCH_GCS_BUCKET_VIDEOS=jal-dronewatch-videos,DRONEWATCH_GCS_BUCKET_SNAPSHOTS=jal-dronewatch-snapshots,DRONEWATCH_ENABLE_TIER1_GEMMA=${ENABLE_TIER1},DRONEWATCH_GEMMA_SERVICE_URL=${GEMMA_SERVICE_URL},DRONEWATCH_GEMMA_MODEL_NAME=google/gemma-4-E2B-it,DRONEWATCH_ALLOYDB_HOST=${ALLOYDB_HOST},DRONEWATCH_ALLOYDB_PORT=${ALLOYDB_PORT},DRONEWATCH_ALLOYDB_DATABASE=${ALLOYDB_DATABASE},DRONEWATCH_ALLOYDB_USER=${ALLOYDB_USER},DRONEWATCH_ALLOYDB_PASSWORD=${ALLOYDB_PASSWORD}" \
     --min-instances=1 \
     --cpu=2 \
     --memory=8Gi \
