@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -9,6 +10,7 @@ import asyncpg
 
 from dronewatch.config import Settings
 from dronewatch.models.events import IncidentCategory, IncidentEvent, ThreatLevel
+from dronewatch.models.workflow_config import EscalationTarget, WorkflowConfig
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ class AlloyDBManager:
         self.settings: Settings = settings
         self._pool: asyncpg.Pool[Any] | None = None
         self._local_fallback_store: list[IncidentEvent] = []
+        self._local_workflow_config: WorkflowConfig | None = None
 
     async def connect(self) -> None:
         """Establish asyncpg connection pool to AlloyDB."""
@@ -80,8 +83,76 @@ class AlloyDBManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incident_events(timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_incidents_threat ON incident_events(threat_level);
+
+                CREATE TABLE IF NOT EXISTS workflow_settings (
+                    config_id VARCHAR(32) PRIMARY KEY DEFAULT 'active',
+                    enable_tier1_gemma BOOLEAN NOT NULL DEFAULT TRUE,
+                    gemma_triage_prompt TEXT NOT NULL,
+                    gemma_triage_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.50,
+                    escalation_target VARCHAR(16) NOT NULL DEFAULT 'GEMINI',
+                    gemini_escalation_prompt TEXT NOT NULL,
+                    gemma_escalation_prompt TEXT NOT NULL,
+                    gemini_model VARCHAR(64) NOT NULL DEFAULT 'gemini-3.6-flash',
+                    gemma_model VARCHAR(64) NOT NULL DEFAULT 'google/gemma-4-E2B-it',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_by VARCHAR(64) NOT NULL DEFAULT 'pilot-admin',
+                    version INT NOT NULL DEFAULT 1,
+                    CONSTRAINT chk_singleton
+                        CHECK (config_id = 'active'),
+                    CONSTRAINT chk_escalation_target
+                        CHECK (escalation_target IN ('GEMINI', 'GEMMA')),
+                    CONSTRAINT chk_threshold_range
+                        CHECK (gemma_triage_threshold >= 0.0 AND gemma_triage_threshold <= 1.0)
+                );
+
+                CREATE TABLE IF NOT EXISTS workflow_settings_history (
+                    history_id BIGSERIAL PRIMARY KEY,
+                    version INT NOT NULL,
+                    enable_tier1_gemma BOOLEAN NOT NULL,
+                    gemma_triage_prompt TEXT NOT NULL,
+                    gemma_triage_threshold DOUBLE PRECISION NOT NULL,
+                    escalation_target VARCHAR(16) NOT NULL,
+                    gemini_escalation_prompt TEXT NOT NULL,
+                    gemma_escalation_prompt TEXT NOT NULL,
+                    gemini_model VARCHAR(64) NOT NULL,
+                    gemma_model VARCHAR(64) NOT NULL,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    changed_by VARCHAR(64) NOT NULL
+                );
                 """)
-            logger.info("AlloyDB schema and vector extensions verified.")
+
+            # Seed default configuration if active row does not exist
+            row = await conn.fetchrow(
+                "SELECT config_id FROM workflow_settings WHERE config_id = 'active'"
+            )
+            if not row:
+                default_config = self._create_default_workflow_config()
+                await conn.execute(
+                    """
+                    INSERT INTO workflow_settings (
+                        config_id, enable_tier1_gemma, gemma_triage_prompt,
+                        gemma_triage_threshold, escalation_target,
+                        gemini_escalation_prompt, gemma_escalation_prompt,
+                        gemini_model, gemma_model, updated_at, updated_by, version
+                    ) VALUES (
+                        'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                    )
+                    ON CONFLICT (config_id) DO NOTHING
+                    """,
+                    default_config.enable_tier1_gemma,
+                    default_config.gemma_triage_prompt,
+                    default_config.gemma_triage_threshold,
+                    str(default_config.escalation_target),
+                    default_config.gemini_escalation_prompt,
+                    default_config.gemma_escalation_prompt,
+                    default_config.gemini_model,
+                    default_config.gemma_model,
+                    default_config.updated_at,
+                    default_config.updated_by,
+                    default_config.version,
+                )
+
+            logger.info("AlloyDB schema, vector extensions, and workflow settings verified.")
 
     async def log_incident(
         self, event: IncidentEvent, vector_embedding: list[float] | None = None
@@ -238,6 +309,139 @@ class AlloyDBManager:
                 ev.acknowledged_by_pilot = True
                 return True
         return False
+
+    def _create_default_workflow_config(self) -> WorkflowConfig:
+        """Generate default workflow configuration from application settings."""
+        return WorkflowConfig(
+            enable_tier1_gemma=self.settings.enable_tier1_gemma,
+            gemma_triage_prompt=self.settings.gemma_triage_prompt,
+            gemma_triage_threshold=self.settings.gemma_triage_threshold,
+            escalation_target=EscalationTarget.GEMINI,
+            gemini_model=self.settings.gemini_model,
+            gemma_model=self.settings.gemma_model_name,
+        )
+
+    async def get_workflow_config(self) -> WorkflowConfig:
+        """Fetch active workflow configuration from AlloyDB or local fallback."""
+        if self._pool:
+            try:
+                async with self._pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT enable_tier1_gemma, gemma_triage_prompt, gemma_triage_threshold,
+                               escalation_target, gemini_escalation_prompt, gemma_escalation_prompt,
+                               gemini_model, gemma_model, updated_at, updated_by, version
+                        FROM workflow_settings
+                        WHERE config_id = 'active'
+                        """
+                    )
+                    if row:
+                        return WorkflowConfig(
+                            enable_tier1_gemma=row["enable_tier1_gemma"],
+                            gemma_triage_prompt=row["gemma_triage_prompt"],
+                            gemma_triage_threshold=row["gemma_triage_threshold"],
+                            escalation_target=EscalationTarget(row["escalation_target"]),
+                            gemini_escalation_prompt=row["gemini_escalation_prompt"],
+                            gemma_escalation_prompt=row["gemma_escalation_prompt"],
+                            gemini_model=row["gemini_model"],
+                            gemma_model=row["gemma_model"],
+                            updated_at=row["updated_at"],
+                            updated_by=row["updated_by"],
+                            version=row["version"],
+                        )
+            except Exception as err:
+                logger.error("AlloyDB workflow config query failed (%s). Falling back.", err)
+
+        if self._local_workflow_config is None:
+            self._local_workflow_config = self._create_default_workflow_config()
+        return self._local_workflow_config
+
+    async def save_workflow_config(self, config: WorkflowConfig) -> WorkflowConfig:
+        """Persist updated workflow configuration to AlloyDB and record history."""
+        config.version += 1
+        config.updated_at = datetime.now(UTC)
+
+        if self._pool:
+            try:
+                async with self._pool.acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute(
+                            """
+                            INSERT INTO workflow_settings (
+                                config_id, enable_tier1_gemma, gemma_triage_prompt,
+                                gemma_triage_threshold, escalation_target,
+                                gemini_escalation_prompt, gemma_escalation_prompt,
+                                gemini_model, gemma_model, updated_at, updated_by, version
+                            ) VALUES (
+                                'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                            )
+                            ON CONFLICT (config_id) DO UPDATE SET
+                                enable_tier1_gemma = EXCLUDED.enable_tier1_gemma,
+                                gemma_triage_prompt = EXCLUDED.gemma_triage_prompt,
+                                gemma_triage_threshold = EXCLUDED.gemma_triage_threshold,
+                                escalation_target = EXCLUDED.escalation_target,
+                                gemini_escalation_prompt = EXCLUDED.gemini_escalation_prompt,
+                                gemma_escalation_prompt = EXCLUDED.gemma_escalation_prompt,
+                                gemini_model = EXCLUDED.gemini_model,
+                                gemma_model = EXCLUDED.gemma_model,
+                                updated_at = EXCLUDED.updated_at,
+                                updated_by = EXCLUDED.updated_by,
+                                version = EXCLUDED.version
+                            """,
+                            config.enable_tier1_gemma,
+                            config.gemma_triage_prompt,
+                            config.gemma_triage_threshold,
+                            str(config.escalation_target),
+                            config.gemini_escalation_prompt,
+                            config.gemma_escalation_prompt,
+                            config.gemini_model,
+                            config.gemma_model,
+                            config.updated_at,
+                            config.updated_by,
+                            config.version,
+                        )
+                        await conn.execute(
+                            """
+                            INSERT INTO workflow_settings_history (
+                                version, enable_tier1_gemma, gemma_triage_prompt,
+                                gemma_triage_threshold, escalation_target,
+                                gemini_escalation_prompt, gemma_escalation_prompt,
+                                gemini_model, gemma_model, changed_at, changed_by
+                            ) VALUES (
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                            )
+                            """,
+                            config.version,
+                            config.enable_tier1_gemma,
+                            config.gemma_triage_prompt,
+                            config.gemma_triage_threshold,
+                            str(config.escalation_target),
+                            config.gemini_escalation_prompt,
+                            config.gemma_escalation_prompt,
+                            config.gemini_model,
+                            config.gemma_model,
+                            config.updated_at,
+                            config.updated_by,
+                        )
+                logger.info("Saved workflow config version %d to AlloyDB.", config.version)
+                self._local_workflow_config = config
+                return config
+            except Exception as err:
+                logger.error(
+                    "Failed to save workflow config in AlloyDB: %s. Using local store.",
+                    err,
+                )
+
+        self._local_workflow_config = config
+        return config
+
+    async def reset_workflow_config(self) -> WorkflowConfig:
+        """Reset workflow configuration to system defaults."""
+        default_config = self._create_default_workflow_config()
+        # Reset version counter if resetting
+        current = await self.get_workflow_config()
+        default_config.version = current.version
+        return await self.save_workflow_config(default_config)
 
     async def close(self) -> None:
         """Close connection pool."""

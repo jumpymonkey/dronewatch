@@ -25,6 +25,7 @@ from dronewatch.models.events import (
     StreamStatus,
     ThreatLevel,
 )
+from dronewatch.models.workflow_config import WorkflowConfig, WorkflowConfigUpdate
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
 from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.stream_processor import (
@@ -39,9 +40,7 @@ logger = logging.getLogger("dronewatch")
 settings = get_settings()
 db_manager = AlloyDBManager(settings)
 analyzer = GeminiVideoAnalyzer(settings)
-gemma_client: GemmaTriageClient | None = (
-    GemmaTriageClient(settings) if settings.enable_tier1_gemma else None
-)
+gemma_client: GemmaTriageClient = GemmaTriageClient(settings)
 
 # Global active streams and processors registry
 active_streams: dict[str, DroneStreamConfig] = {}
@@ -233,6 +232,7 @@ async def register_stream(req: StreamRegisterRequest) -> DroneStreamConfig:
         analyzer=analyzer,
         gemma_client=gemma_client,
         event_callback=broadcast_incident,
+        config_provider=db_manager.get_workflow_config,
     )
     stream_processors[req.drone_id] = processor
     await processor.start()
@@ -467,6 +467,27 @@ async def trigger_simulated_alert(req: SimulationTriggerRequest) -> IncidentEven
     )
     await broadcast_incident(event)
     return event
+
+
+@app.get("/api/admin/workflow-config", response_model=WorkflowConfig)
+async def get_workflow_configuration() -> WorkflowConfig:
+    """Retrieve the active image understanding workflow configuration."""
+    return await db_manager.get_workflow_config()
+
+
+@app.put("/api/admin/workflow-config", response_model=WorkflowConfig)
+async def update_workflow_configuration(update: WorkflowConfigUpdate) -> WorkflowConfig:
+    """Update the image understanding workflow configuration."""
+    current = await db_manager.get_workflow_config()
+    update_dict = update.model_dump(exclude_unset=True)
+    new_config = current.model_copy(update=update_dict)
+    return await db_manager.save_workflow_config(new_config)
+
+
+@app.post("/api/admin/workflow-config/reset", response_model=WorkflowConfig)
+async def reset_workflow_configuration() -> WorkflowConfig:
+    """Reset image understanding workflow configuration to factory defaults."""
+    return await db_manager.reset_workflow_config()
 
 
 @app.websocket("/ws/alerts")

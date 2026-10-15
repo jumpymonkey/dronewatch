@@ -20,6 +20,7 @@ from dronewatch.models.events import (
     StreamStatus,
     ThreatLevel,
 )
+from dronewatch.models.workflow_config import EscalationTarget, WorkflowConfig
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
 from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.motion_filter import MotionFilter
@@ -27,6 +28,7 @@ from dronewatch.services.motion_filter import MotionFilter
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[IncidentEvent], Coroutine[Any, Any, None]]
+ConfigProvider = Callable[[], Coroutine[Any, Any, WorkflowConfig] | WorkflowConfig]
 
 
 def format_video_timestamp(seconds: float | None) -> str | None:
@@ -197,6 +199,7 @@ class DroneStreamProcessor:
         analyzer: GeminiVideoAnalyzer,
         gemma_client: GemmaTriageClient | None = None,
         event_callback: EventCallback | None = None,
+        config_provider: ConfigProvider | None = None,
     ) -> None:
         """Initialize stream processor.
 
@@ -206,6 +209,7 @@ class DroneStreamProcessor:
             analyzer: Gemini analyzer instance.
             gemma_client: Optional Tier 1 Gemma 4 triage client.
             event_callback: Async callback invoked when an incident event is logged.
+            config_provider: Optional callable returning dynamic WorkflowConfig.
         """
         self.config: DroneStreamConfig = config
         if self.config.stream_url:
@@ -215,6 +219,7 @@ class DroneStreamProcessor:
         self.settings: Settings = settings
         self.analyzer: GeminiVideoAnalyzer = analyzer
         self.event_callback: EventCallback | None = event_callback
+        self.config_provider: ConfigProvider | None = config_provider
         self.motion_filter: MotionFilter = MotionFilter(
             sensitivity_threshold=settings.motion_sensitivity_threshold,
             min_motion_area=settings.min_motion_area,
@@ -222,12 +227,9 @@ class DroneStreamProcessor:
         if gemma_client is not None:
             self.gemma_client: GemmaTriageClient | None = gemma_client
             self._owns_gemma_client: bool = False
-        elif settings.enable_tier1_gemma:
+        else:
             self.gemma_client = GemmaTriageClient(settings)
             self._owns_gemma_client = True
-        else:
-            self.gemma_client = None
-            self._owns_gemma_client = False
 
         self.is_running: bool = False
         self._task: asyncio.Task[None] | None = None
@@ -235,6 +237,26 @@ class DroneStreamProcessor:
         # Track periodic Gemma scene description updates (every ~10s)
         self._last_scene_description_time: float = -100.0
         self._last_scene_description_wall: float = 0.0
+
+    async def _get_active_workflow_config(self) -> WorkflowConfig:
+        """Retrieve dynamic active workflow configuration or static fallback."""
+        if self.config_provider is not None:
+            try:
+                res = self.config_provider()
+                if asyncio.iscoroutine(res):
+                    return await res
+                return res  # type: ignore[return-value]
+            except Exception as err:
+                logger.error("Error retrieving dynamic workflow config: %s", err)
+
+        return WorkflowConfig(
+            enable_tier1_gemma=self.settings.enable_tier1_gemma,
+            gemma_triage_prompt=self.settings.gemma_triage_prompt,
+            gemma_triage_threshold=self.settings.gemma_triage_threshold,
+            escalation_target=EscalationTarget.GEMINI,
+            gemini_model=self.settings.gemini_model,
+            gemma_model=self.settings.gemma_model_name,
+        )
 
     async def start(self) -> None:
         """Start the stream processing background task."""
@@ -269,21 +291,24 @@ class DroneStreamProcessor:
         video_timestamp_sec: float | None = None,
         is_heartbeat: bool = False,
     ) -> None:
-        """Execute two-tier analysis on a single frame.
+        """Execute two-tier analysis on a single frame based on dynamic WorkflowConfig.
 
         Tier 1 (Gemma 4): Fast front-line vision triage & routine scene heartbeat.
-        Tier 2 (Gemini Flash): Escalated multimodal threat assessment.
+        Tier 2 (Gemini Flash or Gemma 4): Escalated multimodal threat assessment.
         """
         try:
             formatted_timecode = format_video_timestamp(video_timestamp_sec)
+            workflow_config = await self._get_active_workflow_config()
 
             # Tier 1: Front-line vision triage via Gemma 4 (Cloud Run GPU)
-            if self.gemma_client and self.settings.enable_tier1_gemma:
+            if self.gemma_client and workflow_config.enable_tier1_gemma:
                 triage = await self.gemma_client.triage_frame(
                     frame_bytes=frame_bytes_data,
                     drone_id=self.config.drone_id,
                     timestamp_sec=video_timestamp_sec,
                     request_scene_description=is_heartbeat,
+                    prompt=workflow_config.gemma_triage_prompt,
+                    threshold=workflow_config.gemma_triage_threshold,
                 )
                 if not triage.escalate_to_gemini:
                     if is_heartbeat:
@@ -339,8 +364,23 @@ class DroneStreamProcessor:
                     triage.tags,
                 )
 
-            # Tier 2: Deep Contextual Reasoning via Gemini 3.6 Flash
-            analysis = await self.analyzer.analyze_frame(frame_bytes_data, mime_type="image/jpeg")
+            # Tier 2: Deep Contextual Reasoning via Gemini 3.6 Flash or Gemma 4
+            if (
+                workflow_config.escalation_target == EscalationTarget.GEMMA
+                and self.gemma_client is not None
+            ):
+                analysis = await self.gemma_client.deep_analyze_frame(
+                    frame_bytes=frame_bytes_data,
+                    escalation_prompt=workflow_config.gemma_escalation_prompt,
+                    drone_id=self.config.drone_id,
+                )
+            else:
+                analysis = await self.analyzer.analyze_frame(
+                    image_bytes=frame_bytes_data,
+                    mime_type="image/jpeg",
+                    prompt=workflow_config.gemini_escalation_prompt,
+                )
+
             threat_active = (
                 analysis.suspicious_activity_detected or analysis.threat_level != ThreatLevel.NONE
             )

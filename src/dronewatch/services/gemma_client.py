@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from dronewatch.config import Settings
+from dronewatch.models.events import AnalysisResult, IncidentCategory, ThreatLevel
 from dronewatch.models.triage import GemmaTriageResponse
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,8 @@ class GemmaTriageClient:
         drone_id: str = "drone-unknown",
         timestamp_sec: float | None = None,
         request_scene_description: bool = False,
+        prompt: str | None = None,
+        threshold: float | None = None,
     ) -> GemmaTriageResponse:
         """Submit a single video frame to Tier 1 Gemma 4 for front-line triage.
 
@@ -204,6 +207,8 @@ class GemmaTriageClient:
             timestamp_sec: Optional video position timecode.
             request_scene_description: If True, prompt Gemma 4 for a concise scene
                 summary and safe/alert verdict (for periodic UI telemetry heartbeat).
+            prompt: Optional dynamic prompt overriding default triage prompt.
+            threshold: Optional dynamic confidence score threshold.
 
         Returns:
             GemmaTriageResponse evaluated against threshold.
@@ -229,11 +234,12 @@ class GemmaTriageClient:
             # Encode frame to Base64 data URI
             b64_image = base64.b64encode(frame_bytes).decode("ascii")
 
-            prompt_text = (
-                self.settings.gemma_scene_description_prompt
-                if request_scene_description
-                else self.prompt
-            )
+            if request_scene_description:
+                prompt_text = self.settings.gemma_scene_description_prompt
+            elif prompt is not None and prompt.strip():
+                prompt_text = prompt
+            else:
+                prompt_text = self.prompt
             max_tokens = 64 if request_scene_description else 32
 
             # Format OpenAI Vision / vLLM compatible payload (Option A)
@@ -293,7 +299,8 @@ class GemmaTriageClient:
                 raw_content = str(data["output"])
 
             is_alert, score, tags = self._parse_triage_text(raw_content)
-            escalate = score >= self.threshold
+            cutoff = threshold if threshold is not None else self.threshold
+            escalate = score >= cutoff
 
             decision: str
             if not escalate:
@@ -378,3 +385,187 @@ class GemmaTriageClient:
                 raw_output=str(unexpected),
                 model_name=self.model_name,
             )
+
+    def _parse_deep_analysis_text(
+        self, text: str
+    ) -> tuple[ThreatLevel, IncidentCategory, str, str, float]:
+        """Parse natural language deep analysis text from Gemma 4 into structured fields."""
+        cleaned = text.strip()
+        lower = cleaned.lower()
+
+        # Determine threat level
+        if any(
+            w in lower
+            for w in ("critical", "weapon", "active shooter", "armed", "explosion", "fire")
+        ):
+            threat_level = ThreatLevel.CRITICAL
+            conf = 0.95
+        elif any(
+            w in lower
+            for w in ("high", "breach", "forced entry", "perimeter breach", "climbing fence")
+        ):
+            threat_level = ThreatLevel.HIGH
+            conf = 0.90
+        elif any(
+            w in lower
+            for w in ("medium", "suspicious", "trespassing", "unauthorized", "loitering")
+        ):
+            threat_level = ThreatLevel.MEDIUM
+            conf = 0.85
+        elif any(w in lower for w in ("low", "minor", "parking violation", "traffic")):
+            threat_level = ThreatLevel.LOW
+            conf = 0.80
+        elif any(
+            w in lower
+            for w in (
+                "clear",
+                "safe",
+                "normal",
+                "benign",
+                "routine",
+                "no threat",
+                "no anomaly",
+            )
+        ):
+            threat_level = ThreatLevel.NONE
+            conf = 0.95
+        else:
+            threat_level = ThreatLevel.MEDIUM
+            conf = 0.75
+
+        # Determine category
+        if any(w in lower for w in ("breach", "fence", "gate", "perimeter", "climbing")):
+            category = IncidentCategory.PERIMETER_BREACH
+        elif any(w in lower for w in ("loiter", "standing near", "after hours loitering")):
+            category = IncidentCategory.LOITERING
+        elif any(w in lower for w in ("unattended", "bag", "package", "backpack", "suitcase")):
+            category = IncidentCategory.UNATTENDED_OBJECT
+        elif any(w in lower for w in ("traffic", "parked", "parking", "vehicle", "fire lane")):
+            category = IncidentCategory.TRAFFIC_VIOLATION
+        elif any(w in lower for w in ("hazard", "spill", "fire", "smoke", "danger")):
+            category = IncidentCategory.HAZARD
+        elif threat_level == ThreatLevel.NONE:
+            category = IncidentCategory.CLEAR
+        else:
+            category = IncidentCategory.SUSPICIOUS_BEHAVIOR
+
+        # Summary: First sentence or up to first newline / 140 chars
+        first_line = cleaned.split("\n")[0].strip()
+        if "." in first_line:
+            summary = first_line.split(".")[0].strip() + "."
+        else:
+            summary = first_line[:140]
+
+        return threat_level, category, summary, cleaned, conf
+
+    async def deep_analyze_frame(
+        self,
+        frame_bytes: bytes,
+        escalation_prompt: str,
+        drone_id: str = "drone-unknown",
+    ) -> AnalysisResult:
+        """Perform Tier 2 deep contextual reasoning using Gemma 4 on Cloud Run.
+
+        Args:
+            frame_bytes: JPEG/PNG encoded image bytes.
+            escalation_prompt: Contextual evaluation prompt guiding Gemma 4 analysis.
+            drone_id: Calling drone identifier for telemetry logging.
+
+        Returns:
+            AnalysisResult structured representation.
+        """
+        start_time = time.perf_counter()
+
+        if not self.endpoint:
+            return self._fallback_deep_analysis("Gemma service URL not configured")
+
+        try:
+            b64_image = base64.b64encode(frame_bytes).decode("ascii")
+
+            payload: dict[str, Any] = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": escalation_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{b64_image}",
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 256,
+                "temperature": 0.2,
+            }
+
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": f"DroneWatch-Escalation/2.0 ({drone_id})",
+            }
+            oidc_token = self._get_oidc_token()
+            if oidc_token:
+                headers["Authorization"] = f"Bearer {oidc_token}"
+
+            response = await self._client.post(
+                self.endpoint,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            choices = data.get("choices", [])
+            raw_content = ""
+            if choices and "message" in choices[0]:
+                raw_content = choices[0]["message"].get("content", "")
+            elif "output" in data:
+                raw_content = str(data["output"])
+
+            latency_ms = (time.perf_counter() - start_time) * 1000.0
+            logger.info(
+                "Tier 2 Gemma escalation [%s]: response_len=%d (latency=%.1fms)",
+                drone_id,
+                len(raw_content),
+                latency_ms,
+            )
+
+            threat_level, category, summary, description, conf = (
+                self._parse_deep_analysis_text(raw_content)
+            )
+
+            return AnalysisResult(
+                suspicious_activity_detected=(threat_level != ThreatLevel.NONE),
+                threat_level=threat_level,
+                category=category,
+                summary=summary,
+                description=description,
+                confidence_score=conf,
+                bounding_boxes=[],
+                raw_payload={
+                    "tier": 2,
+                    "model": self.model_name,
+                    "latency_ms": latency_ms,
+                    "raw_output": raw_content,
+                },
+            )
+        except Exception as err:
+            logger.error("Tier 2 Gemma deep analysis error: %s", err)
+            return self._fallback_deep_analysis(str(err))
+
+    def _fallback_deep_analysis(self, reason: str) -> AnalysisResult:
+        """Construct safe default result when Gemma deep analysis fails."""
+        return AnalysisResult(
+            suspicious_activity_detected=False,
+            threat_level=ThreatLevel.NONE,
+            category=IncidentCategory.CLEAR,
+            summary="Routine visual frame (Gemma fallback).",
+            description=f"Normal patrol view. Fallback reason: {reason}",
+            confidence_score=0.5,
+            bounding_boxes=[],
+            raw_payload={"fallback": True, "reason": reason},
+        )

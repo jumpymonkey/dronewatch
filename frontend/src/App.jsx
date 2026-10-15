@@ -3,9 +3,11 @@ import Header from './components/Header';
 import StreamGrid from './components/StreamGrid';
 import AlertSidebar from './components/AlertSidebar';
 import RegisterStreamModal from './components/RegisterStreamModal';
+import AdminView from './components/AdminView';
 import './App.css';
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [streams, setStreams] = useState([]);
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [alerts, setAlerts] = useState([]);
@@ -169,21 +171,29 @@ export default function App() {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Header
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
         activeCount={streams.length}
         onTriggerSim={handleTriggerSimulation}
         onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
       />
 
-      <main className="dashboard-grid">
-        <StreamGrid
-          streams={streams}
-          activeAlerts={alerts}
-          telemetry={telemetry}
-          onUnregisterStream={handleUnregisterStream}
-          onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
-        />
-        <AlertSidebar alerts={alerts} onAcknowledge={handleAcknowledge} />
-      </main>
+      {activeTab === 'dashboard' ? (
+        <main className="dashboard-grid">
+          <StreamGrid
+            streams={streams}
+            activeAlerts={alerts}
+            telemetry={telemetry}
+            onUnregisterStream={handleUnregisterStream}
+            onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
+          />
+          <AlertSidebar alerts={alerts} onAcknowledge={handleAcknowledge} />
+        </main>
+      ) : (
+        <main className="admin-page-container">
+          <AdminView />
+        </main>
+      )}
 
       <RegisterStreamModal
         isOpen={isRegisterModalOpen}
