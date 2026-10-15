@@ -38,6 +38,52 @@ class Settings(BaseSettings):
         description="Gemini model version for video analysis",
     )
 
+    # Tier 1 Gemma Triage Settings (Option A: vLLM on Cloud Run GPU)
+    enable_tier1_gemma: bool = Field(
+        default=False,
+        description="Enable Tier 1 Gemma vision triage before escalating to Gemini",
+    )
+    gemma_service_url: str = Field(
+        default="",
+        description="Internal Cloud Run URL for Gemma inference service",
+    )
+    gemma_model_name: str = Field(
+        default="google/gemma-4-E2B-it",
+        description="Target model identifier served by vLLM",
+    )
+    gemma_triage_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Confidence threshold above which frames are escalated to Tier 2 Gemini",
+    )
+    gemma_timeout_seconds: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=10.0,
+        description="HTTP timeout for Tier 1 triage before circuit breaker trips open",
+    )
+    gemma_triage_prompt: str = Field(
+        default=(
+            "detect campus security anomalies, unauthorized persons, or perimeter breaches; "
+            "answer safe or alert"
+        ),
+        description="Zero-shot prompt sent to Gemma 4 for front-line triage",
+    )
+    gemma_scene_description_interval_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=300.0,
+        description="Interval in seconds between periodic Gemma scene description updates",
+    )
+    gemma_scene_description_prompt: str = Field(
+        default=(
+            "Briefly describe this drone surveillance scene in one concise sentence (max 15 words) "
+            "and conclude with SAFE or ALERT."
+        ),
+        description="Prompt sent to Gemma 4 for periodic scene description heartbeat",
+    )
+
     # Storage & AlloyDB Settings
     gcs_bucket_videos: str = Field(
         default="dronewatch-videos-bucket", description="GCS Bucket for video streams"

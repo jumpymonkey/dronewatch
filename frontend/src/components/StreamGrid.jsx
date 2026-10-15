@@ -100,26 +100,38 @@ export default function StreamGrid({
               />
             )}
 
-            {/* Live Gemini AI Telemetry HUD Banner */}
-            <div className="gemini-hud-banner">
+            {/* Live AI Telemetry HUD Banner */}
+            <div className={`gemini-hud-banner ${isThreat ? 'threat-active' : ''}`}>
               <div className="gemini-hud-header">
-                <span className="gemini-badge">
-                  <Cpu size={12} style={{ marginRight: '4px' }} />
-                  Gemini Flash AI Vision
-                </span>
+                {isThreat ? (
+                  <span className="gemini-badge threat-badge-hud">
+                    <AlertCircle size={12} style={{ marginRight: '4px' }} />
+                    Gemini Flash (Escalated Alert)
+                  </span>
+                ) : droneTelemetry?.description?.includes('Gemma') ? (
+                  <span className="gemini-badge gemma-badge-hud">
+                    <Cpu size={12} style={{ marginRight: '4px' }} />
+                    Gemma 4 Triage (Routine Patrol)
+                  </span>
+                ) : (
+                  <span className="gemini-badge">
+                    <Cpu size={12} style={{ marginRight: '4px' }} />
+                    AI Vision Triage
+                  </span>
+                )}
                 <span className="gemini-hud-time">
                   {droneTelemetry?.video_timestamp_formatted
                     ? `TC ${droneTelemetry.video_timestamp_formatted} • ${new Date(droneTelemetry.timestamp).toLocaleTimeString()}`
                     : droneTelemetry?.timestamp
                     ? new Date(droneTelemetry.timestamp).toLocaleTimeString()
-                    : 'Analyzing...'}
+                    : 'Awaiting 10s Gemma heartbeat...'}
                 </span>
               </div>
 
               <div className="gemini-hud-body">
                 <Eye size={13} className="hud-eye-icon" />
                 <span className="hud-description">
-                  {droneTelemetry?.description || 'Evaluating video stream with Gemini 3.6 Flash...'}
+                  {droneTelemetry?.description || 'Active stream monitoring: Tier 1 Gemma 4 triaging frames...'}
                 </span>
               </div>
             </div>

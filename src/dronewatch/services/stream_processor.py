@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Coroutine
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import av
@@ -14,12 +14,14 @@ import cv2
 from dronewatch.config import Settings
 from dronewatch.models.events import (
     DroneStreamConfig,
+    IncidentCategory,
     IncidentEvent,
     Location,
     StreamStatus,
     ThreatLevel,
 )
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
+from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.motion_filter import MotionFilter
 
 logger = logging.getLogger(__name__)
@@ -40,11 +42,67 @@ def format_video_timestamp(seconds: float | None) -> str | None:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def get_gcs_cache_path(stream_url: str) -> str | None:
+def normalize_stream_url(stream_url: str, default_bucket: str = "") -> str:
+    """Normalize stream URL, resolving placeholders, bare filenames, and GCS paths."""
+    url = stream_url.strip()
+    if not url:
+        return url
+
+    # RTSP streams
+    if url.lower().startswith("rtsp://"):
+        return "rtsp://" + url[7:].strip()
+
+    # Direct HTTP/HTTPS streams
+    if url.lower().startswith(("http://", "https://")):
+        return url
+
+    # Local file path if existing on the current filesystem
+    if os.path.exists(url) and os.path.isfile(url):
+        return url
+
+    target_bucket = default_bucket or "jal-dronewatch-videos"
+
+    placeholder_buckets = {
+        "dronewatch-videos-bucket",
+        "dronewatch-dronevideos-bucket",
+        "dronewatch-sample-videos",
+        "dronewatch-bucket",
+    }
+
+    if url.startswith("gs://"):
+        gcs_path = url[5:].strip()
+        parts = gcs_path.split("/", 1)
+        bucket = parts[0]
+        blob = parts[1] if len(parts) > 1 else ""
+
+        # E.g. gs://S1001976.MP4 where user omitted the bucket
+        if not blob and bucket.lower().endswith((".mp4", ".mov", ".mkv", ".avi")):
+            return f"gs://{target_bucket}/{bucket}"
+
+        # Remap placeholder bucket to actual bucket
+        if bucket.lower() in placeholder_buckets or not bucket:
+            return f"gs://{target_bucket}/{blob}"
+
+        return f"gs://{bucket}/{blob}"
+
+    # If it's a bare filename or relative path
+    basename = os.path.basename(url)
+    if basename.lower().endswith((".mp4", ".mov", ".mkv", ".avi")):
+        return f"gs://{target_bucket}/{basename}"
+
+    # If no extension is specified, default to .MP4 in GCS
+    if "." not in basename:
+        return f"gs://{target_bucket}/{basename}.MP4"
+
+    return url
+
+
+def get_gcs_cache_path(stream_url: str, default_bucket: str = "") -> str | None:
     """Return local cache path for a GCS URL if file exists and is non-empty."""
-    if not stream_url.startswith("gs://"):
+    normalized = normalize_stream_url(stream_url, default_bucket=default_bucket)
+    if not normalized.startswith("gs://"):
         return None
-    gcs_path = stream_url[5:]
+    gcs_path = normalized[5:]
     parts = gcs_path.split("/", 1)
     bucket_name = parts[0]
     blob_name = parts[1] if len(parts) > 1 else ""
@@ -72,12 +130,15 @@ def cleanup_gcs_cache(keep_file: str | None = None) -> None:
         logger.warning("Cache cleanup error: %s", ex)
 
 
-def ensure_gcs_cached(stream_url: str, gcp_project_id: str = "") -> str | None:
+def ensure_gcs_cached(
+    stream_url: str, gcp_project_id: str = "", default_bucket: str = ""
+) -> str | None:
     """Download GCS blob gs://bucket/path to local cache if missing or 0 bytes."""
-    if not stream_url.startswith("gs://"):
+    normalized = normalize_stream_url(stream_url, default_bucket=default_bucket)
+    if not normalized.startswith("gs://"):
         return None
 
-    gcs_path = stream_url[5:]
+    gcs_path = normalized[5:]
     parts = gcs_path.split("/", 1)
     bucket_name = parts[0]
     blob_name = parts[1] if len(parts) > 1 else ""
@@ -99,6 +160,8 @@ def ensure_gcs_cached(stream_url: str, gcp_project_id: str = "") -> str | None:
 
         try:
             logger.info("Downloading GCS blob gs://%s/%s to cache...", bucket_name, blob_name)
+            os.environ["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
+            os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = ""
             from google.cloud import storage
 
             storage_client = storage.Client(project=gcp_project_id or None)
@@ -108,7 +171,7 @@ def ensure_gcs_cached(stream_url: str, gcp_project_id: str = "") -> str | None:
             os.replace(temp_file, cached_file)
             logger.info("Downloaded GCS blob to %s", cached_file)
         except Exception as ex:
-            logger.error("Failed to download GCS video %s: %s", stream_url, ex)
+            logger.error("Failed to download GCS video %s: %s", normalized, ex)
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
@@ -132,6 +195,7 @@ class DroneStreamProcessor:
         config: DroneStreamConfig,
         settings: Settings,
         analyzer: GeminiVideoAnalyzer,
+        gemma_client: GemmaTriageClient | None = None,
         event_callback: EventCallback | None = None,
     ) -> None:
         """Initialize stream processor.
@@ -140,11 +204,14 @@ class DroneStreamProcessor:
             config: Drone stream configuration model.
             settings: Global settings instance.
             analyzer: Gemini analyzer instance.
+            gemma_client: Optional Tier 1 Gemma 4 triage client.
             event_callback: Async callback invoked when an incident event is logged.
         """
         self.config: DroneStreamConfig = config
-        if self.config.stream_url and self.config.stream_url.lower().startswith("rtsp://"):
-            self.config.stream_url = "rtsp://" + self.config.stream_url.strip()[7:]
+        if self.config.stream_url:
+            self.config.stream_url = normalize_stream_url(
+                self.config.stream_url, default_bucket=settings.gcs_bucket_videos
+            )
         self.settings: Settings = settings
         self.analyzer: GeminiVideoAnalyzer = analyzer
         self.event_callback: EventCallback | None = event_callback
@@ -152,9 +219,22 @@ class DroneStreamProcessor:
             sensitivity_threshold=settings.motion_sensitivity_threshold,
             min_motion_area=settings.min_motion_area,
         )
+        if gemma_client is not None:
+            self.gemma_client: GemmaTriageClient | None = gemma_client
+            self._owns_gemma_client: bool = False
+        elif settings.enable_tier1_gemma:
+            self.gemma_client = GemmaTriageClient(settings)
+            self._owns_gemma_client = True
+        else:
+            self.gemma_client = None
+            self._owns_gemma_client = False
+
         self.is_running: bool = False
         self._task: asyncio.Task[None] | None = None
         self.latest_frame_bytes: bytes | None = None
+        # Track periodic Gemma scene description updates (every ~10s)
+        self._last_scene_description_time: float = -100.0
+        self._last_scene_description_wall: float = 0.0
 
     async def start(self) -> None:
         """Start the stream processing background task."""
@@ -179,7 +259,122 @@ class DroneStreamProcessor:
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=0.5)
             except (TimeoutError, asyncio.CancelledError):
                 pass
+        if self._owns_gemma_client and self.gemma_client is not None:
+            await self.gemma_client.aclose()
         logger.info("Stopped stream processor for drone %s", self.config.drone_id)
+
+    async def _analyze_frame(
+        self,
+        frame_bytes_data: bytes,
+        video_timestamp_sec: float | None = None,
+        is_heartbeat: bool = False,
+    ) -> None:
+        """Execute two-tier analysis on a single frame.
+
+        Tier 1 (Gemma 4): Fast front-line vision triage & routine scene heartbeat.
+        Tier 2 (Gemini Flash): Escalated multimodal threat assessment.
+        """
+        try:
+            formatted_timecode = format_video_timestamp(video_timestamp_sec)
+
+            # Tier 1: Front-line vision triage via Gemma 4 (Cloud Run GPU)
+            if self.gemma_client and self.settings.enable_tier1_gemma:
+                triage = await self.gemma_client.triage_frame(
+                    frame_bytes=frame_bytes_data,
+                    drone_id=self.config.drone_id,
+                    timestamp_sec=video_timestamp_sec,
+                    request_scene_description=is_heartbeat,
+                )
+                if not triage.escalate_to_gemini:
+                    if is_heartbeat:
+                        scene_desc = (
+                            triage.scene_description
+                            or triage.raw_output
+                            or "Routine aerial surveillance - zone clear."
+                        )
+                        logger.info(
+                            "Tier 1 Gemma scene heartbeat for %s [TC %s]: %s (latency=%.1fms)",
+                            self.config.drone_id,
+                            formatted_timecode or "N/A",
+                            scene_desc,
+                            triage.tier1_latency_ms,
+                        )
+                        event = IncidentEvent(
+                            drone_id=self.config.drone_id,
+                            timestamp=datetime.now(UTC),
+                            location=Location(zone_name=self.config.zone_name),
+                            threat_level=ThreatLevel.NONE,
+                            category=IncidentCategory.CLEAR,
+                            description=f"Gemma 4 Triage: {scene_desc}",
+                            confidence_score=round(1.0 - triage.triage_score, 2),
+                            bounding_boxes=[],
+                            snapshot_uri=None,
+                            video_timestamp_seconds=video_timestamp_sec,
+                            video_timestamp_formatted=formatted_timecode,
+                        )
+                        if self.event_callback:
+                            await self.event_callback(event)
+                        return
+
+                    logger.info(
+                        "Tier 1 Gemma suppressed benign frame for %s [TC %s]: %s "
+                        "(score=%.2f, latency=%.1fms, tags=%s)",
+                        self.config.drone_id,
+                        formatted_timecode or "N/A",
+                        triage.raw_output.strip() if triage.raw_output else "SAFE",
+                        triage.triage_score,
+                        triage.tier1_latency_ms,
+                        triage.tags,
+                    )
+                    return
+
+                logger.info(
+                    "Tier 1 Gemma escalated frame for %s [TC %s] "
+                    "(decision=%s, score=%.2f, latency=%.1fms, tags=%s)",
+                    self.config.drone_id,
+                    formatted_timecode or "N/A",
+                    triage.tier1_decision,
+                    triage.triage_score,
+                    triage.tier1_latency_ms,
+                    triage.tags,
+                )
+
+            # Tier 2: Deep Contextual Reasoning via Gemini 3.6 Flash
+            analysis = await self.analyzer.analyze_frame(frame_bytes_data, mime_type="image/jpeg")
+            threat_active = (
+                analysis.suspicious_activity_detected or analysis.threat_level != ThreatLevel.NONE
+            )
+
+            if threat_active:
+                self.config.status = StreamStatus.ALERT
+                logger.warning(
+                    "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s",
+                    self.config.drone_id,
+                    formatted_timecode or "N/A",
+                    analysis.threat_level,
+                    analysis.summary,
+                )
+            else:
+                self.config.status = StreamStatus.ONLINE
+
+            event = IncidentEvent(
+                drone_id=self.config.drone_id,
+                timestamp=datetime.now(UTC),
+                location=Location(zone_name=self.config.zone_name),
+                threat_level=analysis.threat_level,
+                category=analysis.category,
+                description=analysis.summary or analysis.description,
+                confidence_score=analysis.confidence_score,
+                bounding_boxes=analysis.bounding_boxes,
+                snapshot_uri=None,
+                video_timestamp_seconds=video_timestamp_sec,
+                video_timestamp_formatted=formatted_timecode,
+            )
+
+            if self.event_callback:
+                await self.event_callback(event)
+        except Exception as ex:
+            logger.error("Error in background frame analysis task: %s", ex)
 
     async def _process_loop(self) -> None:
         """Main frame extraction and analysis loop."""
@@ -187,56 +382,14 @@ class DroneStreamProcessor:
         max_concurrent_analysis: int = 3
         sample_interval: float = 1.0 / self.settings.frame_sampling_fps
 
-        async def _analyze_frame_task(
-            frame_bytes_data: bytes, video_timestamp_sec: float | None = None
-        ) -> None:
-            try:
-                analysis = await self.analyzer.analyze_frame(
-                    frame_bytes_data, mime_type="image/jpeg"
-                )
-                threat_active = (
-                    analysis.suspicious_activity_detected
-                    or analysis.threat_level != ThreatLevel.NONE
-                )
-
-                formatted_timecode = format_video_timestamp(video_timestamp_sec)
-
-                if threat_active:
-                    self.config.status = StreamStatus.ALERT
-                    logger.warning(
-                        "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s",
-                        self.config.drone_id,
-                        formatted_timecode or "N/A",
-                        analysis.threat_level,
-                        analysis.summary,
-                    )
-                else:
-                    self.config.status = StreamStatus.ONLINE
-
-                event = IncidentEvent(
-                    drone_id=self.config.drone_id,
-                    timestamp=datetime.utcnow(),
-                    location=Location(zone_name=self.config.zone_name),
-                    threat_level=analysis.threat_level,
-                    category=analysis.category,
-                    description=analysis.summary or analysis.description,
-                    confidence_score=analysis.confidence_score,
-                    bounding_boxes=analysis.bounding_boxes,
-                    snapshot_uri=None,
-                    video_timestamp_seconds=video_timestamp_sec,
-                    video_timestamp_formatted=formatted_timecode,
-                )
-
-                if self.event_callback:
-                    await self.event_callback(event)
-            except Exception as ex:
-                logger.error("Error in background frame analysis task: %s", ex)
-
         # Resolve GCS gs:// path to local cached file if needed
         local_video_path = self.config.stream_url
         if self.config.stream_url.startswith("gs://"):
             cached_path = await asyncio.to_thread(
-                ensure_gcs_cached, self.config.stream_url, self.settings.gcp_project_id
+                ensure_gcs_cached,
+                self.config.stream_url,
+                self.settings.gcp_project_id,
+                self.settings.gcs_bucket_videos,
             )
             if cached_path:
                 local_video_path = cached_path
@@ -268,6 +421,21 @@ class DroneStreamProcessor:
                             frame_time = float(frame.time)
                             target_time = frame.time + sample_interval
 
+                            now_wall = time.time()
+                            interval = self.settings.gemma_scene_description_interval_seconds
+                            is_heartbeat = False
+                            if (
+                                frame_time - self._last_scene_description_time >= interval
+                                or frame_time < self._last_scene_description_time
+                                or (
+                                    now_wall - self._last_scene_description_wall >= interval
+                                    and self._last_scene_description_time < 0
+                                )
+                            ):
+                                self._last_scene_description_time = frame_time
+                                self._last_scene_description_wall = now_wall
+                                is_heartbeat = True
+
                             # Run motion filter
                             has_motion, motion_score = self.motion_filter.process_frame(img_bgr)
 
@@ -276,13 +444,15 @@ class DroneStreamProcessor:
                                 frame_data = buffer.tobytes()
                                 self.latest_frame_bytes = frame_data
 
-                                if has_motion:
+                                if has_motion or is_heartbeat:
                                     active_analysis_tasks = {
                                         t for t in active_analysis_tasks if not t.done()
                                     }
                                     if len(active_analysis_tasks) < max_concurrent_analysis:
                                         task = asyncio.create_task(
-                                            _analyze_frame_task(frame_data, frame_time)
+                                            self._analyze_frame(
+                                                frame_data, frame_time, is_heartbeat=is_heartbeat
+                                            )
                                         )
                                         active_analysis_tasks.add(task)
                                 else:
@@ -298,10 +468,12 @@ class DroneStreamProcessor:
                         try:
                             container.seek(0)
                             target_time = 0.0
+                            self._last_scene_description_time = -100.0
                         except Exception:
                             container.close()
                             container = av.open(local_video_path)
                             target_time = 0.0
+                            self._last_scene_description_time = -100.0
 
                 container.close()
                 return
@@ -350,13 +522,23 @@ class DroneStreamProcessor:
                     now = time.time()
                     if now - last_ai_time >= sample_interval:
                         last_ai_time = now
+                        interval = self.settings.gemma_scene_description_interval_seconds
+                        is_heartbeat = False
+                        if now - self._last_scene_description_wall >= interval:
+                            self._last_scene_description_wall = now
+                            is_heartbeat = True
+
                         has_motion, motion_score = self.motion_filter.process_frame(frame)
-                        if has_motion:
+                        if has_motion or is_heartbeat:
                             active_analysis_tasks = {
                                 t for t in active_analysis_tasks if not t.done()
                             }
                             if len(active_analysis_tasks) < max_concurrent_analysis:
-                                task = asyncio.create_task(_analyze_frame_task(frame_data, pos_sec))
+                                task = asyncio.create_task(
+                                    self._analyze_frame(
+                                        frame_data, pos_sec, is_heartbeat=is_heartbeat
+                                    )
+                                )
                                 active_analysis_tasks.add(task)
                         else:
                             logger.debug(

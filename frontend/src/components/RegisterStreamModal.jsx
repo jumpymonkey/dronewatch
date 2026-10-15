@@ -1,11 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
   const [droneId, setDroneId] = useState('');
   const [zoneName, setZoneName] = useState('');
-  const [streamType, setStreamType] = useState('LOCAL'); // LOCAL, RTSP, GCS
+  const [streamType, setStreamType] = useState('GCS'); // GCS, LOCAL, RTSP
   const [streamUrl, setStreamUrl] = useState('');
+  const [availableVideos, setAvailableVideos] = useState([]);
+  const [selectedVideo, setSelectedVideo] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    fetch('/api/videos')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setAvailableVideos(data);
+        }
+      })
+      .catch((err) => console.warn('Could not load videos from GCS:', err));
+  }, []);
 
   if (!isOpen) return null;
 
@@ -13,11 +26,28 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
     setDroneId('Drone-S100');
     setZoneName('North Campus Patrol Route');
     if (streamType === 'GCS') {
-      setStreamUrl('gs://dronewatch-videos-bucket/S1002353.MP4');
+      const sampleUrl = 'gs://jal-dronewatch-videos/S1002353.MP4';
+      setStreamUrl(sampleUrl);
+      setSelectedVideo(sampleUrl);
     } else if (streamType === 'RTSP') {
       setStreamUrl('rtsp://192.168.1.100:554/stream1');
     } else {
       setStreamUrl('/home/jeffleinen/jeffdev/dronevideos/videos/S1002353.MP4');
+    }
+  };
+
+  const handleVideoSelect = (url) => {
+    setSelectedVideo(url);
+    setStreamUrl(url);
+    const videoObj = availableVideos.find((v) => v.gcs_url === url);
+    if (videoObj) {
+      const cleanName = videoObj.name.replace(/\.[^/.]+$/, '');
+      if (!droneId || droneId.startsWith('Drone-')) {
+        setDroneId(`Drone-${cleanName}`);
+      }
+      if (!zoneName || zoneName.startsWith('Zone Patrol')) {
+        setZoneName(`Zone Patrol (${cleanName})`);
+      }
     }
   };
 
@@ -40,6 +70,7 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
     setDroneId('');
     setZoneName('');
     setStreamUrl('');
+    setSelectedVideo('');
     onClose();
   };
 
@@ -54,6 +85,50 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
         {error && <div className="error-badge">{error}</div>}
 
         <form onSubmit={handleSubmit} className="register-form">
+          <div className="form-group">
+            <label>Stream Source Type</label>
+            <div className="stream-type-selector">
+              <button
+                type="button"
+                className={`type-btn ${streamType === 'GCS' ? 'active' : ''}`}
+                onClick={() => setStreamType('GCS')}
+              >
+                Cloud Storage (GCS)
+              </button>
+              <button
+                type="button"
+                className={`type-btn ${streamType === 'LOCAL' ? 'active' : ''}`}
+                onClick={() => setStreamType('LOCAL')}
+              >
+                Local MP4 File
+              </button>
+              <button
+                type="button"
+                className={`type-btn ${streamType === 'RTSP' ? 'active' : ''}`}
+                onClick={() => setStreamType('RTSP')}
+              >
+                RTSP Live Feed
+              </button>
+            </div>
+          </div>
+
+          {streamType === 'GCS' && availableVideos.length > 0 && (
+            <div className="form-group">
+              <label>Select Video from Cloud Storage</label>
+              <select
+                value={selectedVideo}
+                onChange={(e) => handleVideoSelect(e.target.value)}
+              >
+                <option value="">-- Choose video from gs://jal-dronewatch-videos --</option>
+                {availableVideos.map((vid) => (
+                  <option key={vid.gcs_url} value={vid.gcs_url}>
+                    {vid.name} ({vid.size_mb} MB)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="form-group">
             <label>Drone Callsign / ID</label>
             <input
@@ -75,33 +150,6 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
           </div>
 
           <div className="form-group">
-            <label>Stream Source Type</label>
-            <div className="stream-type-selector">
-              <button
-                type="button"
-                className={`type-btn ${streamType === 'LOCAL' ? 'active' : ''}`}
-                onClick={() => setStreamType('LOCAL')}
-              >
-                Local MP4 File
-              </button>
-              <button
-                type="button"
-                className={`type-btn ${streamType === 'RTSP' ? 'active' : ''}`}
-                onClick={() => setStreamType('RTSP')}
-              >
-                RTSP Live Feed
-              </button>
-              <button
-                type="button"
-                className={`type-btn ${streamType === 'GCS' ? 'active' : ''}`}
-                onClick={() => setStreamType('GCS')}
-              >
-                Cloud Storage (GCS)
-              </button>
-            </div>
-          </div>
-
-          <div className="form-group">
             <label>
               {streamType === 'RTSP'
                 ? 'RTSP Stream URL (rtsp://...)'
@@ -115,7 +163,7 @@ export default function RegisterStreamModal({ isOpen, onClose, onRegister }) {
                 streamType === 'RTSP'
                   ? 'rtsp://192.168.1.100:554/stream1'
                   : streamType === 'GCS'
-                  ? 'gs://dronewatch-dronevideos-bucket/S1002353.MP4'
+                  ? 'gs://jal-dronewatch-videos/S1002353.MP4'
                   : '/home/jeffleinen/jeffdev/dronevideos/videos/S1002353.MP4'
               }
               value={streamUrl}

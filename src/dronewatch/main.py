@@ -26,9 +26,11 @@ from dronewatch.models.events import (
     ThreatLevel,
 )
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
+from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.stream_processor import (
     DroneStreamProcessor,
     get_gcs_cache_path,
+    normalize_stream_url,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +39,9 @@ logger = logging.getLogger("dronewatch")
 settings = get_settings()
 db_manager = AlloyDBManager(settings)
 analyzer = GeminiVideoAnalyzer(settings)
+gemma_client: GemmaTriageClient | None = (
+    GemmaTriageClient(settings) if settings.enable_tier1_gemma else None
+)
 
 # Global active streams and processors registry
 active_streams: dict[str, DroneStreamConfig] = {}
@@ -73,7 +78,10 @@ class SimulationTriggerRequest(BaseModel):
 
 async def broadcast_incident(event: IncidentEvent) -> None:
     """Broadcast an incident event to AlloyDB and all connected WebSocket clients."""
-    await db_manager.log_incident(event)
+    # Persist verified alerts/incidents to AlloyDB;
+    # avoid polluting database with routine 10s heartbeats
+    if event.threat_level != ThreatLevel.NONE and event.category != IncidentCategory.CLEAR:
+        await db_manager.log_incident(event)
 
     payload = event.model_dump_json()
     disconnected: list[WebSocket] = []
@@ -100,6 +108,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down DroneWatch application lifespan...")
     for processor in list(stream_processors.values()):
         await processor.stop()
+    if gemma_client is not None:
+        await gemma_client.aclose()
     await db_manager.close()
 
 
@@ -127,6 +137,8 @@ async def health_check() -> dict[str, Any]:
         "service": settings.app_name,
         "environment": settings.environment,
         "gemini_model": settings.gemini_model,
+        "tier1_gemma_enabled": settings.enable_tier1_gemma,
+        "gemma_model": settings.gemma_model_name if settings.enable_tier1_gemma else None,
         "active_streams_count": len(active_streams),
     }
 
@@ -135,6 +147,61 @@ async def health_check() -> dict[str, Any]:
 async def list_streams() -> list[DroneStreamConfig]:
     """List all registered active drone video streams."""
     return list(active_streams.values())
+
+
+@app.get("/api/videos")
+async def list_available_videos() -> list[dict[str, Any]]:
+    """List available surveillance video files in the configured GCS bucket."""
+    videos: list[dict[str, Any]] = []
+    bucket_name = settings.gcs_bucket_videos
+    try:
+        os.environ["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
+        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = ""
+        from google.cloud import storage
+
+        client = storage.Client(project=settings.gcp_project_id or None)
+        bucket = client.bucket(bucket_name)
+        blobs = await asyncio.to_thread(lambda: list(bucket.list_blobs()))
+
+        for blob in blobs:
+            if blob.name.lower().endswith((".mp4", ".mov", ".mkv", ".avi")):
+                size_bytes = blob.size or 0
+                videos.append(
+                    {
+                        "name": blob.name,
+                        "gcs_url": f"gs://{bucket_name}/{blob.name}",
+                        "size_bytes": size_bytes,
+                        "size_mb": round(size_bytes / (1024 * 1024), 1),
+                        "updated": blob.updated.isoformat() if blob.updated else None,
+                    }
+                )
+        videos.sort(key=lambda x: str(x["name"]))
+    except Exception as ex:
+        logger.warning("Could not list GCS video bucket %s: %s", bucket_name, ex)
+
+    if not videos:
+        known_samples = [
+            ("S1002353.MP4", 417.0),
+            ("S1001976.MP4", 2842.0),
+            ("S1002354.MP4", 814.0),
+            ("DJI_0104.MP4", 311.2),
+            ("DJI_0106.MP4", 92.0),
+            ("DJI_0108.MP4", 151.7),
+            ("DJI_0116.MP4", 160.6),
+            ("DJI_0121.MP4", 102.5),
+        ]
+        for name, mb in known_samples:
+            videos.append(
+                {
+                    "name": name,
+                    "gcs_url": f"gs://{bucket_name}/{name}",
+                    "size_bytes": int(mb * 1024 * 1024),
+                    "size_mb": mb,
+                    "updated": None,
+                }
+            )
+
+    return videos
 
 
 @app.post("/api/streams")
@@ -150,9 +217,7 @@ async def register_stream(req: StreamRegisterRequest) -> DroneStreamConfig:
             detail=f"Maximum concurrent streams limit ({settings.max_concurrent_streams}) reached.",
         )
 
-    clean_url = req.stream_url.strip()
-    if clean_url.lower().startswith("rtsp://"):
-        clean_url = "rtsp://" + clean_url[7:]
+    clean_url = normalize_stream_url(req.stream_url, settings.gcs_bucket_videos)
 
     config = DroneStreamConfig(
         drone_id=req.drone_id,
@@ -166,6 +231,7 @@ async def register_stream(req: StreamRegisterRequest) -> DroneStreamConfig:
         config=config,
         settings=settings,
         analyzer=analyzer,
+        gemma_client=gemma_client,
         event_callback=broadcast_incident,
     )
     stream_processors[req.drone_id] = processor
@@ -200,8 +266,16 @@ def send_range_file_response(
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get("range")
 
+    cors_headers = {
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Range, Content-Range, Content-Type",
+    }
+
     if not range_header:
-        return FileResponse(path=file_path, media_type=media_type)
+        headers = dict(cors_headers)
+        headers["Content-Length"] = str(file_size)
+        return FileResponse(path=file_path, media_type=media_type, headers=headers)
 
     try:
         range_str = range_header.strip().lower().replace("bytes=", "")
@@ -216,7 +290,7 @@ def send_range_file_response(
         if start >= file_size or start > end:
             return Response(
                 status_code=416,
-                headers={"Content-Range": f"bytes */{file_size}"},
+                headers={"Content-Range": f"bytes */{file_size}", **cors_headers},
             )
 
         length = end - start + 1
@@ -230,18 +304,20 @@ def send_range_file_response(
             media_type=media_type,
             headers={
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
                 "Content-Length": str(length),
+                **cors_headers,
             },
         )
     except Exception as ex:
         logger.error("Failed local file range stream for %s: %s", file_path, ex)
-        return FileResponse(path=file_path, media_type=media_type)
+        return FileResponse(path=file_path, media_type=media_type, headers=cors_headers)
 
 
 def stream_gcs_range_response(gs_url: str, request: Request, project_id: str) -> Response:
     """Stream byte ranges directly from GCS blob for instant browser video playback."""
     try:
+        os.environ["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
+        os.environ["GOOGLE_API_CERTIFICATE_CONFIG"] = ""
         from google.cloud import storage
 
         clean_path = gs_url.replace("gs://", "")
@@ -249,7 +325,7 @@ def stream_gcs_range_response(gs_url: str, request: Request, project_id: str) ->
         bucket_name = parts[0]
         blob_name = parts[1] if len(parts) > 1 else ""
 
-        client = storage.Client(project=project_id)
+        client = storage.Client(project=project_id or None)
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.reload()
@@ -279,6 +355,8 @@ def stream_gcs_range_response(gs_url: str, request: Request, project_id: str) ->
                 "Content-Range": f"bytes {start}-{end}/{total_size}",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(length),
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Range, Content-Range, Content-Type",
             },
         )
     except Exception as ex:
@@ -290,13 +368,15 @@ def stream_gcs_range_response(gs_url: str, request: Request, project_id: str) ->
 async def get_stream_video(drone_id: str, request: Request, stream_url: str | None = None) -> Any:
     """Serve video content for a registered drone stream feed or GCS video source."""
     config = active_streams.get(drone_id)
-    target_url = config.stream_url if config else stream_url
+    raw_target = config.stream_url if config else stream_url
 
-    if not target_url:
+    if not raw_target:
         possible_gcs = f"gs://{settings.gcs_bucket_videos}/{drone_id}"
         if not drone_id.lower().endswith(".mp4"):
             possible_gcs += ".MP4"
-        target_url = possible_gcs
+        raw_target = possible_gcs
+
+    target_url = normalize_stream_url(raw_target, settings.gcs_bucket_videos)
 
     # Serve local video file if path exists on disk and is non-empty
     if (
@@ -307,7 +387,7 @@ async def get_stream_video(drone_id: str, request: Request, stream_url: str | No
         return send_range_file_response(target_url, request)
 
     if target_url.startswith("gs://"):
-        cached_file = get_gcs_cache_path(target_url)
+        cached_file = get_gcs_cache_path(target_url, default_bucket=settings.gcs_bucket_videos)
         if cached_file:
             return send_range_file_response(cached_file, request)
 

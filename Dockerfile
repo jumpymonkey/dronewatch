@@ -14,7 +14,7 @@ COPY pyproject.toml ruff.toml README.md ./
 COPY src/ ./src/
 
 # Install python dependencies into virtual environment
-RUN uv sync --frozen --no-dev || uv sync --no-dev
+RUN uv sync --no-dev --default-index https://pypi.org/simple
 
 # Runtime container stage
 FROM python:3.12-slim-bookworm AS runner

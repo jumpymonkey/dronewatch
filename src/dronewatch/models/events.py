@@ -1,6 +1,6 @@
 """Domain data models and Pydantic schemas for DroneWatch."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
@@ -70,7 +70,9 @@ class IncidentEvent(BaseModel):
 
     event_id: UUID = Field(default_factory=uuid4, description="Unique incident event ID")
     drone_id: str = Field(..., description="Identifier of reporting drone")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Event timestamp")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(UTC), description="Event timestamp"
+    )
     location: Location = Field(default_factory=Location, description="Location metadata")
     threat_level: ThreatLevel = Field(..., description="Severity threat level")
     category: IncidentCategory = Field(..., description="Incident category classification")
