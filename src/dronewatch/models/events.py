@@ -126,6 +126,32 @@ class IncidentEvent(BaseModel):
     acknowledged_by_pilot: bool = Field(
         default=False, description="Whether pilot has acknowledged alert"
     )
+    source_tier: str = Field(
+        default="triage",
+        description=(
+            "Analysis tier producing this event/summary: 'triage' (Tier 1) or 'escalation' (Tier 2)"
+        ),
+    )
+    source_model: str = Field(
+        default="gemma",
+        description="Model family producing this event/summary: 'gemma' or 'gemini'",
+    )
+    model_name: str | None = Field(
+        default=None,
+        description="Full model name identifier e.g. 'google/gemma-4-E2B-it' or 'gemini-3.6-flash'",
+    )
+    scene_summary: str | None = Field(
+        default=None,
+        description="Concise visual scene summary from triage or escalation model",
+    )
+    raw_response: str | None = Field(
+        default=None,
+        description="Raw response text or JSON string returned by Gemma or Gemini",
+    )
+    latency_ms: float | None = Field(
+        default=None,
+        description="Inference and round-trip latency in milliseconds",
+    )
 
 
 class DroneStreamConfig(BaseModel):
@@ -158,3 +184,12 @@ class AnalysisResult(BaseModel):
         default_factory=list, description="Target bounding boxes"
     )
     raw_payload: dict[str, Any] = Field(default_factory=dict, description="Metadata key-values")
+    model_name: str | None = Field(
+        default=None, description="Specific model that evaluated the frame"
+    )
+    latency_ms: float | None = Field(
+        default=None, description="Model inference latency in milliseconds"
+    )
+    raw_response: str | None = Field(
+        default=None, description="Exact raw text response string returned by model"
+    )

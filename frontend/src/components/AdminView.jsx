@@ -12,7 +12,19 @@ import {
   Database,
   Layers,
   ArrowRight,
+  Activity,
+  FileText,
+  X,
+  Copy,
+  Check,
 } from 'lucide-react';
+
+const GEMINI_MODELS = [
+  { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash (Next-Gen Fast Multimodal Reasoning)' },
+  { id: 'gemini-3.7-flash', label: 'gemini-3.7-flash (Hybrid Reasoning Flash)' },
+  { id: 'gemini-3.6-flash', label: 'gemini-3.6-flash (Default Stable Flash)' },
+  { id: 'gemini-4-aragon', label: 'gemini-4-aragon (Advanced Multimodal Agent)' },
+];
 
 export default function AdminView() {
   const [config, setConfig] = useState(null);
@@ -22,6 +34,11 @@ export default function AdminView() {
   const [resetting, setResetting] = useState(false);
   const [statusMessage, setStatusMessage] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
+
+  const [recentResponses, setRecentResponses] = useState([]);
+  const [loadingResponses, setLoadingResponses] = useState(false);
+  const [selectedResponse, setSelectedResponse] = useState(null);
+  const [copiedResponse, setCopiedResponse] = useState(false);
 
   const fetchConfig = async () => {
     setLoading(true);
@@ -42,8 +59,24 @@ export default function AdminView() {
     }
   };
 
+  const fetchRecentResponses = async () => {
+    setLoadingResponses(true);
+    try {
+      const res = await fetch('/api/ai/responses?limit=30');
+      if (res.ok) {
+        const data = await res.json();
+        setRecentResponses(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch recent AI responses:', err);
+    } finally {
+      setLoadingResponses(false);
+    }
+  };
+
   useEffect(() => {
     fetchConfig();
+    fetchRecentResponses();
   }, []);
 
   const isDirty =
@@ -54,7 +87,8 @@ export default function AdminView() {
       config.gemma_triage_threshold !== initialConfig.gemma_triage_threshold ||
       config.escalation_target !== initialConfig.escalation_target ||
       config.gemini_escalation_prompt !== initialConfig.gemini_escalation_prompt ||
-      config.gemma_escalation_prompt !== initialConfig.gemma_escalation_prompt);
+      config.gemma_escalation_prompt !== initialConfig.gemma_escalation_prompt ||
+      config.gemini_model !== initialConfig.gemini_model);
 
   const handleSave = async (e) => {
     if (e) e.preventDefault();
@@ -71,6 +105,7 @@ export default function AdminView() {
       escalation_target: config.escalation_target,
       gemini_escalation_prompt: config.gemini_escalation_prompt,
       gemma_escalation_prompt: config.gemma_escalation_prompt,
+      gemini_model: config.gemini_model,
     };
 
     try {
@@ -338,7 +373,7 @@ export default function AdminView() {
               <div className="target-card-header">
                 <div className="target-title-wrap">
                   <Sparkles size={20} className="card-gemini-icon" />
-                  <h4>Gemini 3.6 Flash (Vertex AI)</h4>
+                  <h4>Gemini Cloud ({config?.gemini_model || 'gemini-3.6-flash'})</h4>
                 </div>
                 <div className="target-radio-indicator">
                   <div className="radio-inner" />
@@ -351,7 +386,7 @@ export default function AdminView() {
               <div className="target-card-footer">
                 <span className="target-pill">Vertex AI API</span>
                 <span className="target-pill">Bounding Boxes</span>
-                <span className="target-pill">Default</span>
+                <span className="target-pill">{config?.gemini_model || 'gemini-3.6-flash'}</span>
               </div>
             </div>
 
@@ -386,23 +421,85 @@ export default function AdminView() {
           {/* Dynamic Prompt Editor based on selection */}
           <div className="prompt-editor-group">
             {config?.escalation_target === 'GEMINI' ? (
-              <div className="form-group">
-                <div className="label-with-hint">
-                  <label htmlFor="gemini-escalation-prompt">Gemini 3.6 Flash Escalation Prompt</label>
-                  <span className="hint-text">
-                    Prompt instructing Gemini Flash to analyze campus threat and return schema JSON
-                  </span>
+              <>
+                <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                  <div className="label-with-hint">
+                    <label htmlFor="gemini-model-select">Gemini Escalation Model</label>
+                    <span className="hint-text">
+                      Select Vertex AI Gemini model version for Tier 2 escalation
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <select
+                      id="gemini-model-select"
+                      style={{
+                        flex: 1,
+                        padding: '0.75rem 1rem',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-glass)',
+                        background: 'rgba(0, 0, 0, 0.45)',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'var(--font-mono, monospace)',
+                        fontSize: '0.9rem',
+                        outline: 'none',
+                      }}
+                      value={
+                        GEMINI_MODELS.some((m) => m.id === config?.gemini_model)
+                          ? config?.gemini_model
+                          : 'custom'
+                      }
+                      onChange={(e) => {
+                        if (e.target.value !== 'custom') {
+                          setConfig((prev) => ({ ...prev, gemini_model: e.target.value }));
+                        }
+                      }}
+                    >
+                      {GEMINI_MODELS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                      <option value="custom">Custom Model Identifier...</option>
+                    </select>
+                    {!GEMINI_MODELS.some((m) => m.id === config?.gemini_model) && (
+                      <input
+                        type="text"
+                        placeholder="e.g. gemini-3.8-flash"
+                        className="admin-textarea mono-font"
+                        style={{
+                          flex: 1,
+                          padding: '0.75rem 1rem',
+                          height: 'auto',
+                        }}
+                        value={config?.gemini_model || ''}
+                        onChange={(e) =>
+                          setConfig((prev) => ({ ...prev, gemini_model: e.target.value }))
+                        }
+                      />
+                    )}
+                  </div>
                 </div>
-                <textarea
-                  id="gemini-escalation-prompt"
-                  rows={10}
-                  className="admin-textarea mono-font"
-                  value={config?.gemini_escalation_prompt || ''}
-                  onChange={(e) =>
-                    setConfig((prev) => ({ ...prev, gemini_escalation_prompt: e.target.value }))
-                  }
-                />
-              </div>
+
+                <div className="form-group">
+                  <div className="label-with-hint">
+                    <label htmlFor="gemini-escalation-prompt">
+                      Gemini Escalation Prompt ({config?.gemini_model || 'gemini-3.6-flash'})
+                    </label>
+                    <span className="hint-text">
+                      Prompt instructing Gemini to analyze campus threat and return schema JSON
+                    </span>
+                  </div>
+                  <textarea
+                    id="gemini-escalation-prompt"
+                    rows={10}
+                    className="admin-textarea mono-font"
+                    value={config?.gemini_escalation_prompt || ''}
+                    onChange={(e) =>
+                      setConfig((prev) => ({ ...prev, gemini_escalation_prompt: e.target.value }))
+                    }
+                  />
+                </div>
+              </>
             ) : (
               <div className="form-group">
                 <div className="label-with-hint">
@@ -470,6 +567,252 @@ export default function AdminView() {
           </div>
         </div>
       </form>
+
+      {/* Live AI Responses Telemetry Section */}
+      <div className="admin-section glass-panel" style={{ marginTop: '2rem' }}>
+        <div className="section-header" style={{ justifyContent: 'space-between' }}>
+          <div className="section-title-group">
+            <div
+              className="section-badge"
+              style={{ background: 'rgba(0, 242, 254, 0.15)', color: 'var(--accent-cyan)' }}
+            >
+              <Activity size={16} />
+              <span>Live AI Telemetry</span>
+            </div>
+            <h3>Recent AI Responses &bull; Triage & Escalation Log</h3>
+          </div>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={fetchRecentResponses}
+            disabled={loadingResponses}
+            style={{
+              fontSize: '0.8rem',
+              padding: '0.4rem 0.8rem',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
+          >
+            <RefreshCw size={13} className={loadingResponses ? 'spin-icon' : ''} />
+            <span>Refresh Log</span>
+          </button>
+        </div>
+
+        <p className="section-description">
+          Review live raw outputs from frontline Gemma 4 triage and escalated Gemini / Gemma deep reasoning.
+        </p>
+
+        {recentResponses.length === 0 ? (
+          <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+            <p>
+              No AI inference responses recorded yet in the ring buffer. Start or register drone streams to view live telemetry.
+            </p>
+          </div>
+        ) : (
+          <div className="ai-log-table-wrap">
+            <table className="ai-log-table">
+              <thead>
+                <tr>
+                  <th>Time / TC</th>
+                  <th>Drone ID</th>
+                  <th>Pipeline Tier</th>
+                  <th>Model Engine</th>
+                  <th>Threat / Verdict</th>
+                  <th>Latency</th>
+                  <th>Scene Summary</th>
+                  <th>Raw Output</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentResponses.map((item, idx) => {
+                  const isEscalation = item.source_tier === 'escalation';
+                  const isGemini = item.source_model === 'gemini';
+                  return (
+                    <tr key={item.event_id || idx}>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {item.video_timestamp_formatted
+                          ? `TC ${item.video_timestamp_formatted}`
+                          : new Date(item.timestamp).toLocaleTimeString()}
+                      </td>
+                      <td style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>
+                        {item.drone_id}
+                      </td>
+                      <td>
+                        <span
+                          className={`alert-tier-tag ${
+                            isEscalation
+                              ? isGemini
+                                ? 'tier-tag-gemini'
+                                : 'tier-tag-gemma-escalation'
+                              : 'tier-tag-gemma-triage'
+                          }`}
+                        >
+                          {isEscalation ? 'Tier 2 Escalation' : 'Tier 1 Triage'}
+                        </span>
+                      </td>
+                      <td>{item.model_name || (isGemini ? 'Gemini Flash' : 'Gemma 4')}</td>
+                      <td>
+                        <span
+                          style={{
+                            fontWeight: 600,
+                            color:
+                              item.threat_level !== 'CLEAR' && item.threat_level !== 'NONE'
+                                ? 'var(--threat-critical)'
+                                : 'var(--threat-clear)',
+                          }}
+                        >
+                          {item.threat_level || 'CLEAR'}
+                        </span>
+                      </td>
+                      <td>{item.latency_ms != null ? `${Math.round(item.latency_ms)}ms` : '-'}</td>
+                      <td
+                        style={{
+                          maxWidth: '280px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        title={item.scene_summary || item.description}
+                      >
+                        {item.scene_summary || item.description || '-'}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-hud-raw"
+                          onClick={() => setSelectedResponse(item)}
+                          disabled={!item.raw_response}
+                          style={{ opacity: item.raw_response ? 1 : 0.4 }}
+                        >
+                          <FileText size={11} style={{ marginRight: '3px' }} />
+                          Inspect
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Raw Response Modal in Admin View */}
+      {selectedResponse && (
+        <div className="raw-modal-backdrop" onClick={() => setSelectedResponse(null)}>
+          <div className="raw-modal-dialog glass-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="raw-modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <Cpu size={18} color="var(--accent-cyan)" />
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>
+                  AI Response Inspector &bull; {selectedResponse.drone_id}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="btn-modal-close"
+                onClick={() => setSelectedResponse(null)}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="raw-modal-meta-grid">
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Pipeline Tier:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.source_tier === 'escalation'
+                    ? 'Tier 2 Escalation'
+                    : 'Tier 1 Triage'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Model Engine:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.model_name || selectedResponse.source_model}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Threat Level:</span>
+                <span
+                  className="raw-meta-val"
+                  style={{
+                    color:
+                      selectedResponse.threat_level !== 'CLEAR' &&
+                      selectedResponse.threat_level !== 'NONE'
+                        ? 'var(--threat-critical)'
+                        : 'var(--threat-clear)',
+                  }}
+                >
+                  {selectedResponse.threat_level || 'CLEAR'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Confidence:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.confidence_score != null
+                    ? `${(selectedResponse.confidence_score * 100).toFixed(1)}%`
+                    : 'N/A'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Latency:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.latency_ms != null
+                    ? `${selectedResponse.latency_ms.toFixed(1)} ms`
+                    : 'N/A'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Timecode:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.video_timestamp_formatted || 'N/A'}
+                </span>
+              </div>
+            </div>
+
+            <div className="raw-modal-section">
+              <div className="raw-section-title">Scene Summary</div>
+              <div className="raw-summary-box">
+                {selectedResponse.scene_summary ||
+                  selectedResponse.description ||
+                  '(No summary recorded)'}
+              </div>
+            </div>
+
+            <div className="raw-modal-section">
+              <div className="raw-section-header">
+                <span className="raw-section-title">Raw Model Response Output</span>
+                <button
+                  type="button"
+                  className="btn-copy-raw"
+                  onClick={() => {
+                    navigator.clipboard.writeText(selectedResponse.raw_response || '');
+                    setCopiedResponse(true);
+                    setTimeout(() => setCopiedResponse(false), 2000);
+                  }}
+                >
+                  {copiedResponse ? (
+                    <>
+                      <Check size={12} color="#00e676" />
+                      <span style={{ color: '#00e676' }}>Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={12} />
+                      <span>Copy Output</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="raw-response-pre">
+                {selectedResponse.raw_response || '(No raw model response payload captured)'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

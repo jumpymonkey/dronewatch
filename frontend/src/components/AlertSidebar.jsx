@@ -39,7 +39,21 @@ export default function AlertSidebar({ alerts, onAcknowledge }) {
             <div key={alert.event_id} className={`alert-item ${alert.threat_level}`}>
               <div className="alert-item-header">
                 <span className="alert-drone-tag">{alert.drone_id}</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  {alert.source_tier && (
+                    <span
+                      className={`alert-tier-tag ${
+                        alert.source_tier === 'escalation'
+                          ? alert.source_model === 'gemini'
+                            ? 'tier-tag-gemini'
+                            : 'tier-tag-gemma-escalation'
+                          : 'tier-tag-gemma-triage'
+                      }`}
+                    >
+                      {alert.source_tier === 'escalation' ? 'Escalation' : 'Triage'} &bull;{' '}
+                      {alert.model_name || (alert.source_model === 'gemini' ? 'Gemini Flash' : 'Gemma 4')}
+                    </span>
+                  )}
                   {alert.video_timestamp_formatted && (
                     <span className="video-timecode-tag" title="Video Stream Timecode">
                       TC {alert.video_timestamp_formatted}
@@ -57,7 +71,7 @@ export default function AlertSidebar({ alerts, onAcknowledge }) {
                     Video Marker: {alert.video_timestamp_formatted}
                   </span>
                 )}
-                {alert.description}
+                {alert.scene_summary || alert.description}
               </p>
 
               {!alert.acknowledged_by_pilot ? (

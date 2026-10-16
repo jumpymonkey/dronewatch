@@ -336,6 +336,12 @@ class DroneStreamProcessor:
                             snapshot_uri=None,
                             video_timestamp_seconds=video_timestamp_sec,
                             video_timestamp_formatted=formatted_timecode,
+                            source_tier="triage",
+                            source_model="gemma",
+                            model_name=triage.model_name or self.settings.gemma_model_name,
+                            scene_summary=scene_desc,
+                            raw_response=triage.raw_output,
+                            latency_ms=triage.tier1_latency_ms,
                         )
                         if self.event_callback:
                             await self.event_callback(event)
@@ -354,10 +360,11 @@ class DroneStreamProcessor:
                     return
 
                 logger.info(
-                    "Tier 1 Gemma escalated frame for %s [TC %s] "
+                    "Tier 1 Gemma escalated frame for %s [TC %s]: response='%s' "
                     "(decision=%s, score=%.2f, latency=%.1fms, tags=%s)",
                     self.config.drone_id,
                     formatted_timecode or "N/A",
+                    triage.raw_output.strip() if triage.raw_output else "",
                     triage.tier1_decision,
                     triage.triage_score,
                     triage.tier1_latency_ms,
@@ -365,21 +372,52 @@ class DroneStreamProcessor:
                 )
 
             # Tier 2: Deep Contextual Reasoning via Gemini 3.6 Flash or Gemma 4
-            if (
+            target_is_gemma = (
                 workflow_config.escalation_target == EscalationTarget.GEMMA
                 and self.gemma_client is not None
-            ):
+            )
+            if target_is_gemma:
+                source_tier = "escalation"
+                source_model = "gemma"
+                model_name = getattr(
+                    self.gemma_client, "model_name", self.settings.gemma_model_name
+                )
                 analysis = await self.gemma_client.deep_analyze_frame(
                     frame_bytes=frame_bytes_data,
                     escalation_prompt=workflow_config.gemma_escalation_prompt,
                     drone_id=self.config.drone_id,
                 )
             else:
+                source_tier = "escalation"
+                source_model = "gemini"
+                model_name = (
+                    workflow_config.gemini_model
+                    or getattr(self.analyzer, "model", None)
+                    or self.settings.gemini_model
+                )
                 analysis = await self.analyzer.analyze_frame(
                     image_bytes=frame_bytes_data,
                     mime_type="image/jpeg",
                     prompt=workflow_config.gemini_escalation_prompt,
+                    model=model_name,
                 )
+
+            summary_text = (
+                analysis.summary
+                or analysis.description
+                or "Routine aerial surveillance - zone clear."
+            )
+
+            logger.info(
+                "Tier 2 [%s/%s] response for %s [TC %s]: latency=%.1fms | raw='%s' | summary='%s'",
+                source_tier,
+                source_model,
+                self.config.drone_id,
+                formatted_timecode or "N/A",
+                analysis.latency_ms or 0.0,
+                analysis.raw_response.strip() if analysis.raw_response else "",
+                summary_text,
+            )
 
             is_potential_threat = (
                 analysis.suspicious_activity_detected or analysis.threat_level != ThreatLevel.NONE
@@ -395,13 +433,15 @@ class DroneStreamProcessor:
                 bounding_boxes = analysis.bounding_boxes
                 logger.warning(
                     "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s "
-                    "(confidence=%.2f >= threshold=%.2f)",
+                    "(confidence=%.2f >= threshold=%.2f, source=%s/%s)",
                     self.config.drone_id,
                     formatted_timecode or "N/A",
                     threat_level,
-                    analysis.summary,
+                    summary_text,
                     analysis.confidence_score,
                     workflow_config.gemma_triage_threshold,
+                    source_tier,
+                    source_model,
                 )
             else:
                 self.config.status = StreamStatus.ONLINE
@@ -411,13 +451,15 @@ class DroneStreamProcessor:
                 if is_potential_threat:
                     logger.info(
                         "Suppressed below-threshold threat from Drone %s [TC %s]: [%s] %s "
-                        "(confidence=%.2f < threshold=%.2f)",
+                        "(confidence=%.2f < threshold=%.2f, source=%s/%s)",
                         self.config.drone_id,
                         formatted_timecode or "N/A",
                         analysis.threat_level,
-                        analysis.summary,
+                        summary_text,
                         analysis.confidence_score,
                         workflow_config.gemma_triage_threshold,
+                        source_tier,
+                        source_model,
                     )
 
             event = IncidentEvent(
@@ -426,14 +468,18 @@ class DroneStreamProcessor:
                 location=Location(zone_name=self.config.zone_name),
                 threat_level=threat_level,
                 category=category,
-                description=analysis.summary
-                or analysis.description
-                or "Routine aerial surveillance - zone clear.",
+                description=summary_text,
                 confidence_score=analysis.confidence_score,
                 bounding_boxes=bounding_boxes,
                 snapshot_uri=None,
                 video_timestamp_seconds=video_timestamp_sec,
                 video_timestamp_formatted=formatted_timecode,
+                source_tier=source_tier,
+                source_model=source_model,
+                model_name=analysis.model_name or model_name,
+                scene_summary=summary_text,
+                raw_response=analysis.raw_response,
+                latency_ms=analysis.latency_ms,
             )
 
             if self.event_callback:

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -47,6 +48,9 @@ active_streams: dict[str, DroneStreamConfig] = {}
 stream_processors: dict[str, DroneStreamProcessor] = {}
 connected_websockets: list[WebSocket] = []
 
+# In-memory telemetry log of recent AI responses across triage and escalation
+ai_responses_history: deque[dict[str, Any]] = deque(maxlen=200)
+
 FALLBACK_VIDEO_URL = (
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
 )
@@ -77,6 +81,25 @@ class SimulationTriggerRequest(BaseModel):
 
 async def broadcast_incident(event: IncidentEvent) -> None:
     """Broadcast an incident event to AlloyDB and all connected WebSocket clients."""
+    # Record response in AI telemetry ring buffer
+    ai_responses_history.append(
+        {
+            "event_id": str(event.event_id),
+            "timestamp": event.timestamp.isoformat(),
+            "drone_id": event.drone_id,
+            "source_tier": event.source_tier,
+            "source_model": event.source_model,
+            "model_name": event.model_name,
+            "threat_level": str(event.threat_level),
+            "category": str(event.category),
+            "confidence_score": event.confidence_score,
+            "scene_summary": event.scene_summary or event.description,
+            "raw_response": event.raw_response,
+            "latency_ms": event.latency_ms,
+            "video_timestamp_formatted": event.video_timestamp_formatted,
+        }
+    )
+
     # Persist verified alerts/incidents to AlloyDB;
     # avoid polluting database with routine 10s heartbeats
     if event.threat_level != ThreatLevel.NONE and event.category != IncidentCategory.CLEAR:
@@ -488,6 +511,15 @@ async def update_workflow_configuration(update: WorkflowConfigUpdate) -> Workflo
 async def reset_workflow_configuration() -> WorkflowConfig:
     """Reset image understanding workflow configuration to factory defaults."""
     return await db_manager.reset_workflow_config()
+
+
+@app.get("/api/ai/responses")
+async def get_ai_responses(drone_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """Retrieve recent AI model responses (triage and escalation) across streams."""
+    responses = list(ai_responses_history)
+    if drone_id:
+        responses = [r for r in responses if r.get("drone_id") == drone_id]
+    return responses[-limit:][::-1]
 
 
 @app.websocket("/ws/alerts")

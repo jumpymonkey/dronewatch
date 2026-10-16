@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from google import genai
@@ -47,6 +48,7 @@ class GeminiVideoAnalyzer:
         image_bytes: bytes,
         mime_type: str = "image/jpeg",
         prompt: str | None = None,
+        model: str | None = None,
     ) -> AnalysisResult:
         """Analyze a drone video frame for suspicious activity using Gemini Flash.
 
@@ -54,6 +56,7 @@ class GeminiVideoAnalyzer:
             image_bytes: Raw image byte buffer (JPEG/PNG).
             mime_type: Image MIME type.
             prompt: Optional custom escalation prompt. Defaults to system default.
+            model: Optional Gemini model identifier override (e.g. gemini-3.8-flash).
 
         Returns:
             AnalysisResult structured Pydantic object.
@@ -61,17 +64,36 @@ class GeminiVideoAnalyzer:
         active_prompt: str = prompt if prompt is not None else DEFAULT_GEMINI_ESCALATION_PROMPT
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-        models_to_try = [self.model_name]
+        models_to_try = [model or self.model_name]
 
         last_error: Exception | None = None
         for model in models_to_try:
             try:
+                start_time = time.perf_counter()
                 response = await asyncio.to_thread(
                     self._sync_generate_content, model, image_part, active_prompt
                 )
+                latency_ms = (time.perf_counter() - start_time) * 1000.0
+                raw_text = response.text or ""
 
-                if response.text:
-                    result = AnalysisResult.model_validate_json(response.text)
+                logger.info(
+                    "Tier 2 Gemini escalation [%s]: latency=%.1fms | response='%s'",
+                    model,
+                    latency_ms,
+                    raw_text.strip(),
+                )
+
+                if raw_text:
+                    result = AnalysisResult.model_validate_json(raw_text)
+                    result.model_name = model
+                    result.latency_ms = latency_ms
+                    result.raw_response = raw_text
+                    result.raw_payload = {
+                        "tier": 2,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "raw_output": raw_text,
+                    }
                     return result
 
                 logger.warning("Gemini model %s returned empty response text.", model)

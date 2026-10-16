@@ -679,13 +679,16 @@ class GemmaTriageClient:
 
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             logger.info(
-                "Tier 2 Gemma escalation [%s]: response_len=%d (latency=%.1fms)",
+                "Tier 2 Gemma escalation [%s]: latency=%.1fms | response='%s'",
                 drone_id,
-                len(raw_content),
                 latency_ms,
+                raw_content.strip(),
             )
 
             analysis = self._parse_deep_analysis_text(raw_content)
+            analysis.model_name = self.model_name
+            analysis.latency_ms = latency_ms
+            analysis.raw_response = raw_content
             analysis.raw_payload = {
                 "tier": 2,
                 "model": self.model_name,
@@ -708,4 +711,7 @@ class GemmaTriageClient:
             confidence_score=0.5,
             bounding_boxes=[],
             raw_payload={"fallback": True, "reason": reason},
+            model_name=self.model_name,
+            latency_ms=0.0,
+            raw_response=f"Fallback: {reason}",
         )

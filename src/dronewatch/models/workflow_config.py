@@ -120,6 +120,9 @@ class WorkflowConfigUpdate(BaseModel):
     escalation_target: EscalationTarget | None = None
     gemini_escalation_prompt: str | None = Field(default=None, min_length=10)
     gemma_escalation_prompt: str | None = Field(default=None, min_length=10)
+    gemini_model: str | None = Field(
+        default=None, min_length=1, description="Gemini model identifier"
+    )
 
     @field_validator("escalation_target", mode="before")
     @classmethod

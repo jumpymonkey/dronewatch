@@ -83,8 +83,22 @@ class AlloyDBManager:
                     video_timestamp_seconds DOUBLE PRECISION,
                     video_timestamp_formatted VARCHAR(32),
                     acknowledged_by_pilot BOOLEAN DEFAULT FALSE,
-                    description_vector vector(768)
+                    description_vector vector(768),
+                    source_tier VARCHAR(32) DEFAULT 'triage',
+                    source_model VARCHAR(32) DEFAULT 'gemma',
+                    model_name VARCHAR(64),
+                    scene_summary TEXT,
+                    raw_response TEXT,
+                    latency_ms DOUBLE PRECISION
                 );
+                ALTER TABLE incident_events
+                    ADD COLUMN IF NOT EXISTS source_tier VARCHAR(32) DEFAULT 'triage';
+                ALTER TABLE incident_events
+                    ADD COLUMN IF NOT EXISTS source_model VARCHAR(32) DEFAULT 'gemma';
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS model_name VARCHAR(64);
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS scene_summary TEXT;
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS raw_response TEXT;
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS latency_ms DOUBLE PRECISION;
                 CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incident_events(timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_incidents_threat ON incident_events(threat_level);
 
@@ -193,9 +207,12 @@ class AlloyDBManager:
                             event_id, drone_id, timestamp, zone_name, latitude, longitude,
                             threat_level, category, description, confidence_score,
                             bounding_boxes, snapshot_uri, video_timestamp_seconds,
-                            video_timestamp_formatted, acknowledged_by_pilot, description_vector
+                            video_timestamp_formatted, acknowledged_by_pilot, description_vector,
+                            source_tier, source_model, model_name, scene_summary,
+                            raw_response, latency_ms
                         ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                            $17, $18, $19, $20, $21, $22
                         )
                         """,
                         event.event_id,
@@ -214,6 +231,12 @@ class AlloyDBManager:
                         event.video_timestamp_formatted,
                         event.acknowledged_by_pilot,
                         vector_str,
+                        event.source_tier,
+                        event.source_model,
+                        event.model_name,
+                        event.scene_summary,
+                        event.raw_response,
+                        event.latency_ms,
                     )
                 logger.info("Logged incident %s to AlloyDB.", event.event_id)
                 return
@@ -246,7 +269,9 @@ class AlloyDBManager:
                             SELECT event_id, drone_id, timestamp, zone_name, latitude, longitude,
                                    threat_level, category, description, confidence_score,
                                    bounding_boxes, snapshot_uri, video_timestamp_seconds,
-                                   video_timestamp_formatted, acknowledged_by_pilot
+                                   video_timestamp_formatted, acknowledged_by_pilot,
+                                   source_tier, source_model, model_name, scene_summary,
+                                   raw_response, latency_ms
                             FROM incident_events
                             WHERE threat_level = $1
                             ORDER BY timestamp DESC
@@ -261,7 +286,9 @@ class AlloyDBManager:
                             SELECT event_id, drone_id, timestamp, zone_name, latitude, longitude,
                                    threat_level, category, description, confidence_score,
                                    bounding_boxes, snapshot_uri, video_timestamp_seconds,
-                                   video_timestamp_formatted, acknowledged_by_pilot
+                                   video_timestamp_formatted, acknowledged_by_pilot,
+                                   source_tier, source_model, model_name, scene_summary,
+                                   raw_response, latency_ms
                             FROM incident_events
                             ORDER BY timestamp DESC
                             LIMIT $1
@@ -289,6 +316,12 @@ class AlloyDBManager:
                                 video_timestamp_seconds=r["video_timestamp_seconds"],
                                 video_timestamp_formatted=r["video_timestamp_formatted"],
                                 acknowledged_by_pilot=r["acknowledged_by_pilot"],
+                                source_tier=r["source_tier"] or "triage",
+                                source_model=r["source_model"] or "gemma",
+                                model_name=r["model_name"],
+                                scene_summary=r["scene_summary"],
+                                raw_response=r["raw_response"],
+                                latency_ms=r["latency_ms"],
                             )
                         )
                     return events

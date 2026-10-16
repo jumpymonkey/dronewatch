@@ -78,11 +78,13 @@ def test_workflow_config_update_partial() -> None:
     update = WorkflowConfigUpdate(
         escalation_target="gemma",  # type: ignore[arg-type]
         gemma_triage_threshold=0.75,
+        gemini_model="gemini-3.8-flash",
     )
     dumped = update.model_dump(exclude_unset=True)
     assert dumped == {
         "escalation_target": EscalationTarget.GEMMA,
         "gemma_triage_threshold": 0.75,
+        "gemini_model": "gemini-3.8-flash",
     }
 
 
@@ -158,6 +160,7 @@ def test_api_workflow_config_put_and_reset(client: TestClient) -> None:
         "escalation_target": "gemma",
         "gemma_triage_threshold": 0.65,
         "gemma_escalation_prompt": "Custom escalation prompt for Gemma 4 test.",
+        "gemini_model": "gemini-3.8-flash",
     }
     put_resp = client.put("/api/admin/workflow-config", json=put_payload)
     assert put_resp.status_code == 200
@@ -165,11 +168,13 @@ def test_api_workflow_config_put_and_reset(client: TestClient) -> None:
     assert data["escalation_target"] == "GEMMA"
     assert data["gemma_triage_threshold"] == 0.65
     assert data["gemma_escalation_prompt"] == "Custom escalation prompt for Gemma 4 test."
+    assert data["gemini_model"] == "gemini-3.8-flash"
 
     # Validate change persists on GET
     get_resp = client.get("/api/admin/workflow-config")
     assert get_resp.status_code == 200
     assert get_resp.json()["escalation_target"] == "GEMMA"
+    assert get_resp.json()["gemini_model"] == "gemini-3.8-flash"
 
     # Reset
     reset_resp = client.post("/api/admin/workflow-config/reset")
@@ -177,6 +182,7 @@ def test_api_workflow_config_put_and_reset(client: TestClient) -> None:
     reset_data = reset_resp.json()
     assert reset_data["escalation_target"] == "GEMINI"
     assert reset_data["gemma_triage_threshold"] == 0.5
+    assert reset_data["gemini_model"] == "gemini-3.6-flash"
 
 
 def test_api_workflow_config_validation_rejection(client: TestClient) -> None:
@@ -332,9 +338,79 @@ async def test_stream_processor_tier1_disabled_calls_tier2_gemini(
     # Tier 1 Gemma triage was completely bypassed
     mock_gemma.triage_frame.assert_not_awaited()
 
-    # Gemini analyze_frame was called with custom prompt
+    # Gemini analyze_frame was called with custom prompt and model
     mock_gemini.analyze_frame.assert_awaited_once_with(
         image_bytes=frame_bytes,
         mime_type="image/jpeg",
         prompt="Direct Gemini prompt without triage",
+        model="gemini-3.6-flash",
     )
+
+
+@pytest.mark.parametrize(
+    "target_model", ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-4-aragon"]
+)
+@pytest.mark.asyncio
+async def test_stream_processor_uses_custom_gemini_model(
+    test_stream_config: DroneStreamConfig,
+    target_model: str,
+) -> None:
+    """Verify processor dynamically escalates to configured Gemini model."""
+    custom_config = WorkflowConfig(
+        enable_tier1_gemma=False,
+        escalation_target=EscalationTarget.GEMINI,
+        gemini_model=target_model,
+        gemini_escalation_prompt="Escalation prompt for custom model",
+    )
+
+    mock_gemini = MagicMock(spec=GeminiVideoAnalyzer)
+    mock_gemini.analyze_frame = AsyncMock(
+        return_value=AnalysisResult(
+            threat_level=ThreatLevel.LOW,
+            category=IncidentCategory.CLEAR,
+            summary="Zone clear",
+            description="No suspicious activity.",
+            confidence_score=0.9,
+            bounding_boxes=[],
+            suspicious_activity_detected=False,
+            model_name=target_model,
+        )
+    )
+
+    processor = DroneStreamProcessor(
+        config=test_stream_config,
+        settings=Settings(),
+        analyzer=mock_gemini,
+        config_provider=lambda: custom_config,
+    )
+
+    frame_bytes = b"test-frame-bytes"
+    await processor._analyze_frame(frame_bytes)
+
+    mock_gemini.analyze_frame.assert_awaited_once_with(
+        image_bytes=frame_bytes,
+        mime_type="image/jpeg",
+        prompt="Escalation prompt for custom model",
+        model=target_model,
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyzer_accepts_model_override() -> None:
+    """Verify GeminiVideoAnalyzer invokes the overridden model when specified."""
+    analyzer = GeminiVideoAnalyzer(Settings())
+    mock_response = MagicMock()
+    mock_response.text = (
+        '{"threat_level": "CLEAR", "category": "CLEAR", "summary": "Clear", '
+        '"description": "All good", "confidence_score": 0.95, "bounding_boxes": [], '
+        '"suspicious_activity_detected": false}'
+    )
+    analyzer._sync_generate_content = MagicMock(return_value=mock_response)  # type: ignore[method-assign]
+
+    result = await analyzer.analyze_frame(
+        image_bytes=b"dummy-image",
+        model="gemini-4-aragon",
+    )
+    assert result.model_name == "gemini-4-aragon"
+    analyzer._sync_generate_content.assert_called_once()
+    assert analyzer._sync_generate_content.call_args[0][0] == "gemini-4-aragon"
