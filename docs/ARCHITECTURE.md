@@ -1,7 +1,7 @@
 # DroneWatch Architecture Design Document
 **Hierarchical Two-Tier AI Inference: Front-Line Gemma Triage & Gemini Escalation**
 
-- **Document Version:** 2.0.0
+- **Document Version:** 2.2.0
 - **Status:** Approved Architecture Specification
 - **Author:** Klara Lindermann, Staff Google Cloud Architect & Data Platform Engineer
 - **Target Runtime:** Google Cloud Run, Vertex AI, AlloyDB for PostgreSQL
@@ -380,6 +380,114 @@ INFO: Tier 1 Gemma vision triage [drone-alpha]: prompt='detect campus security a
    - Implement `GemmaTriageClient` with Google OIDC authentication and fail-open resilience.
    - Implement 10-second HUD telemetry heartbeat for operator confirmation.
    - Validate with comprehensive pytest suite covering circuit breaker trip, recovery, and payload mocking.
-3. **Phase 3: Production Operations & Monitoring (Active)**
-   - Monitor live video feeds via Cloud Logging filter recipes.
-   - Calibrate triage escalation thresholds against campus-specific video streams.
+3. **Phase 3: Dynamic Workflow Administration & Multimodal Model Agility (Completed)**
+   - Implement dynamic workflow configuration engine with AlloyDB persistence (`workflow_config` table).
+   - Support on-the-fly toggling between Gemini and Gemma for Tier 2 escalation without service restarts.
+   - Support selectable Gemini escalation models (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-4-aragon`, and custom model identifiers).
+   - Implement React Administration UI with real-time dirty state tracking and reset capabilities.
+   - Stream HUD badges and Alert Log telemetry tracking origin tier (`triage`/`escalation`), model family, model identifier, and inference latency.
+   - Full test suite expansion to 57 unit and integration tests.
+
+---
+
+## 11. Dynamic Workflow Configuration & Administration Engine
+
+### 11.1 Architectural Rationale
+Operational campus environments require dynamic tuning of vision thresholds, triage prompts, and multimodal reasoning models without redeploying microservices or interrupting live RTSP video feeds. Version 2.2 introduces the **Dynamic Workflow Configuration Engine**, allowing security operators to customize AI behavior across all active drone feeds in real time.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 Administration Console                                 │
+│                                (React SPA AdminView.jsx)                               │
+└───────────────────────────────────────────┬────────────────────────────────────────────┘
+                                            │ PUT /api/admin/workflow-config
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                             FastAPI Workflow Config Router                             │
+│                                                                                        │
+│   ┌───────────────────────────┐                     ┌──────────────────────────────┐   │
+│   │ WorkflowConfigUpdate      │                     │ Database Store (AlloyDB)     │   │
+│   │ Pydantic Validation       ├────────────────────►│ table: workflow_config       │   │
+│   │ (extra="forbid")          │                     │ singleton row (id=1)         │   │
+│   └─────────────┬─────────────┘                     └──────────────┬───────────────┘   │
+│                 │                                                  │                   │
+│                 │ Updates In-Memory Cache                          │ Persisted         │
+│                 ▼                                                  ▼                   │
+│   ┌────────────────────────────────────────────────────────────────────────────────┐   │
+│   │ Dynamic Config Provider (Callable[[], Awaitable[WorkflowConfig]])              │   │
+│   └───────────────────────────────────────┬────────────────────────────────────────┘   │
+└───────────────────────────────────────────┼────────────────────────────────────────────┘
+                                            │ Injected per evaluated frame
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DroneStreamProcessor Engine                               │
+│                                                                                        │
+│   1. Resolve active WorkflowConfig                                                     │
+│   2. If enable_tier1_gemma:                                                            │
+│        Call GemmaTriageClient with gemma_triage_prompt & gemma_triage_threshold        │
+│        If anomaly detected -> Escalate to Tier 2                                       │
+│      Else:                                                                             │
+│        Bypass Tier 1 -> Directly escalate all motion frames                            │
+│   3. Tier 2 Escalation Target:                                                         │
+│      ├─► GEMINI: Invoke GeminiVideoAnalyzer with gemini_model & gemini_escalation_prompt│
+│      └─► GEMMA:  Invoke GemmaTriageClient.deep_analyze_frame with gemma_escalation_prompt│
+│   4. Broadcast IncidentEvent with source_tier, source_model, model_name & latency_ms   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 AlloyDB Schema Specification
+Configuration settings are persisted in AlloyDB within a dedicated single-row configuration table:
+
+```sql
+CREATE TABLE IF NOT EXISTS workflow_config (
+    id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    enable_tier1_gemma BOOLEAN NOT NULL DEFAULT TRUE,
+    escalation_target VARCHAR(32) NOT NULL DEFAULT 'GEMINI',
+    gemma_triage_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.50,
+    gemma_triage_prompt TEXT NOT NULL,
+    gemini_escalation_prompt TEXT NOT NULL,
+    gemma_escalation_prompt TEXT NOT NULL,
+    gemini_model VARCHAR(64) NOT NULL DEFAULT 'gemini-3.6-flash',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### 11.3 Dynamic Model Resolution Matrix
+
+| Target Config | Active Engine | Model Identifier | Prompt Applied | Fallback / Failure Mode |
+|---|---|---|---|---|
+| `escalation_target=GEMINI`, `gemini_model=gemini-3.8-flash` | Vertex AI Gemini | `gemini-3.8-flash` | `gemini_escalation_prompt` | Falls back to default model list or logs structured alert |
+| `escalation_target=GEMINI`, `gemini_model=gemini-3.7-flash` | Vertex AI Gemini | `gemini-3.7-flash` | `gemini_escalation_prompt` | Falls back to default model list or logs structured alert |
+| `escalation_target=GEMINI`, `gemini_model=gemini-3.6-flash` | Vertex AI Gemini | `gemini-3.6-flash` | `gemini_escalation_prompt` | Default production model |
+| `escalation_target=GEMINI`, `gemini_model=gemini-4-aragon` | Vertex AI Gemini | `gemini-4-aragon` | `gemini_escalation_prompt` | Next-generation multimodal model |
+| `escalation_target=GEMMA` | Cloud Run GPU | `google/gemma-4-E2B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
+
+### 11.4 Gemma as Tier 2 Deep Inspection Model
+When configured for Gemma escalation (`escalation_target=GEMMA`), `GemmaTriageClient.deep_analyze_frame()` directs the model to output a strictly compliant JSON schema matching Pydantic `AnalysisResult`:
+
+```json
+{
+  "suspicious_activity_detected": true,
+  "threat_level": "HIGH",
+  "category": "PERIMETER_BREACH",
+  "summary": "Concise scene summary",
+  "description": "Detailed explanation of visual observations",
+  "confidence_score": 0.88,
+  "bounding_boxes": [
+    {"ymin": 0.25, "xmin": 0.35, "ymax": 0.75, "xmax": 0.65, "label": "person"}
+  ]
+}
+```
+
+Threat alerts are gated on `confidence_score >= gemma_triage_threshold`, preventing low-confidence hallucinations from triggering critical sirens or pilot alerts.
+
+### 11.5 Observability & Telemetry Audit Contract
+Every evaluated frame and security incident publishes full attribution metadata across WebSockets and Cloud Logging:
+
+- `source_tier`: Analysis tier producing the verdict (`"triage"` or `"escalation"`).
+- `source_model`: Model family (`"gemma"` or `"gemini"`).
+- `model_name`: Full model identifier string (e.g., `"gemini-3.8-flash"` or `"google/gemma-4-E2B-it"`).
+- `scene_summary`: Concise summary displayed on HUD.
+- `raw_response`: Unmodified response text or JSON string for compliance audits.
+- `latency_ms`: Complete inference and network transit latency in milliseconds.
+

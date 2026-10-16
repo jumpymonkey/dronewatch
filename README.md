@@ -148,6 +148,21 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 - **AlloyDB + pgvector Integration:** Confirmed incident events and spatial telemetry are persisted to AlloyDB for PostgreSQL with vector embeddings for retrospective semantic queries.
 - **Frontend Error Resilience:** The React + Vite frontend (`StreamGrid`) features auto-retry logic with cache-busting on `<img className="video-player">` elements to seamlessly manage RTSP connection handshakes.
 
+### 4. Dynamic Workflow Administration & Multimodal Model Agility
+- **In-App Administration Tab:** Dedicated admin console in the React dashboard to adjust vision pipelines in real time without service redeployment or stream interruptions.
+- **Tier 1 Gemma Triage Controls:**
+  - Toggle Tier 1 triage gate on/off. When disabled, all motion-triggered frames route directly to Tier 2.
+  - Customize the zero-shot Gemma triage prompt.
+  - Adjust escalation confidence threshold ($0.00$ to $1.00$).
+- **Tier 2 Escalation Engine:**
+  - Choose between **Gemini** (default) or **Gemma** for Tier 2 deep analysis.
+  - Dedicated prompt editors for Gemini and Gemma escalations with automated schema guidance.
+- **Dynamic Gemini Escalation Models:**
+  - Dynamic model dropdown supporting `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-4-aragon`, and custom model identifiers.
+- **AlloyDB Persistence:** Single-row `workflow_config` table persists settings across container restarts with automatic schema migration and fallback.
+- **Live Stream HUD Attribution:** Drone video overlays display active model badges, analysis source tier (`triage` vs `escalation`), and round-trip inference latencies in milliseconds.
+- **Complete Response Auditing:** Structured logging captures exact raw responses, summaries, and classifications from both triage and escalation tiers.
+
 ---
 
 ## Configuration & Environment Variables
@@ -368,7 +383,7 @@ dronewatch/
 │   └── ARCHITECTURE.md               # Two-Tier Hierarchical AI Architecture Specification
 ├── frontend/                         # React + Vite frontend application
 │   ├── src/
-│   │   ├── components/               # UI Components (StreamGrid, Header, AlertLog)
+│   │   ├── components/               # UI Components (StreamGrid, Header, AlertSidebar, AdminView)
 │   │   └── App.jsx                   # Main React entry point
 │   ├── package.json                  # Frontend dependencies
 │   └── vite.config.js                # Vite dev server configuration
@@ -378,21 +393,23 @@ dronewatch/
 ├── src/dronewatch/                   # Core Python backend package
 │   ├── db/                           # AlloyDB / local memory store implementations
 │   ├── models/                       # Pydantic v2 schemas
-│   │   ├── events.py                 # IncidentEvent & Alert contracts
-│   │   └── triage.py                 # GemmaTriageRequest & Response models
+│   │   ├── events.py                 # IncidentEvent, AnalysisResult & Telemetry contracts
+│   │   ├── triage.py                 # GemmaTriageRequest & Response models
+│   │   └── workflow_config.py        # WorkflowConfig & WorkflowConfigUpdate schemas
 │   ├── services/
-│   │   ├── analyzer.py               # Gemini 3.6 Flash vision analyzer service
-│   │   ├── gemma_client.py           # Tier 1 Gemma 4 vLLM triage client
+│   │   ├── analyzer.py               # Gemini vision analyzer service (dynamic model support)
+│   │   ├── gemma_client.py           # Tier 1 triage & Tier 2 Gemma deep inspection client
 │   │   ├── motion_filter.py          # OpenCV motion pre-filtering service
-│   │   └── stream_processor.py       # RTSP & MP4 ingestion engine with tiered triage
+│   │   └── stream_processor.py       # Ingestion engine with dynamic tiered routing & hot-reloading
 │   ├── config.py                     # Application settings (pydantic-settings)
 │   └── main.py                       # FastAPI REST API & WebSocket endpoints
-├── tests/                            # Pytest test suite (36 tests)
+├── tests/                            # Pytest test suite (57 tests)
 │   ├── test_api.py                   # REST API and WebSocket tests
-│   ├── test_analyzer.py              # Gemini analyzer tests
+│   ├── test_analyzer.py              # Gemini analyzer tests (dynamic models)
 │   ├── test_events_model.py          # Pydantic schema validation tests
 │   ├── test_gemma_client.py          # Gemma client unit tests (OIDC, triage, circuit breaker)
-│   └── test_stream_processor_gemma.py # Stream processor tiered pipeline tests
+│   ├── test_stream_processor_gemma.py # Stream processor tiered pipeline tests
+│   └── test_workflow_config.py       # Workflow configuration API, AlloyDB & routing tests
 ├── pyproject.toml                    # Python project configuration (uv/ruff/pytest)
 └── README.md                         # Project documentation
 ```
