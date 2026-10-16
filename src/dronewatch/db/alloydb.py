@@ -10,7 +10,11 @@ import asyncpg
 
 from dronewatch.config import Settings
 from dronewatch.models.events import IncidentCategory, IncidentEvent, ThreatLevel
-from dronewatch.models.workflow_config import EscalationTarget, WorkflowConfig
+from dronewatch.models.workflow_config import (
+    DEFAULT_GEMMA_ESCALATION_PROMPT,
+    EscalationTarget,
+    WorkflowConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +155,20 @@ class AlloyDBManager:
                     default_config.updated_by,
                     default_config.version,
                 )
+
+            # Migrate legacy default Gemma escalation prompt to structured JSON schema prompt
+            await conn.execute(
+                """
+                UPDATE workflow_settings
+                SET gemma_escalation_prompt = $1
+                WHERE config_id = 'active'
+                  AND (
+                    gemma_escalation_prompt LIKE 'Analyze this drone security surveillance frame%'
+                    OR LENGTH(gemma_escalation_prompt) < 300
+                  )
+                """,
+                DEFAULT_GEMMA_ESCALATION_PROMPT,
+            )
 
             logger.info("AlloyDB schema, vector extensions, and workflow settings verified.")
 

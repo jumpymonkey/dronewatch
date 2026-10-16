@@ -14,6 +14,7 @@ from dronewatch.models.events import (
     ThreatLevel,
 )
 from dronewatch.models.triage import GemmaTriageResponse
+from dronewatch.models.workflow_config import EscalationTarget, WorkflowConfig
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
 from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.stream_processor import DroneStreamProcessor
@@ -250,3 +251,161 @@ async def test_circuit_breaker_fails_open_to_gemini(
     mock_gemini_analyzer.analyze_frame.assert_called_once()
     assert len(callback_events) == 1
     assert callback_events[0].threat_level == ThreatLevel.HIGH
+
+
+@pytest.mark.asyncio
+async def test_tier2_gemma_without_tier1_clear_frame(
+    stream_config: DroneStreamConfig,
+    tier1_disabled_settings: Settings,
+    mock_gemini_analyzer: MagicMock,
+) -> None:
+    """Verify that when Tier 1 is disabled and Gemma is Tier 2, clear frames do not alert."""
+    mock_gemma = MagicMock(spec=GemmaTriageClient)
+    mock_gemma.deep_analyze_frame = AsyncMock(
+        return_value=AnalysisResult(
+            suspicious_activity_detected=False,
+            threat_level=ThreatLevel.NONE,
+            category=IncidentCategory.CLEAR,
+            summary="Routine aerial surveillance - zone clear.",
+            description="No suspicious activity detected.",
+            confidence_score=0.95,
+            bounding_boxes=[],
+        )
+    )
+
+    callback_events: list[IncidentEvent] = []
+
+    async def mock_callback(event: IncidentEvent) -> None:
+        callback_events.append(event)
+
+    wf_config = WorkflowConfig(
+        enable_tier1_gemma=False,
+        escalation_target=EscalationTarget.GEMMA,
+        gemma_triage_threshold=0.70,
+    )
+
+    processor = DroneStreamProcessor(
+        config=stream_config,
+        settings=tier1_disabled_settings,
+        analyzer=mock_gemini_analyzer,
+        gemma_client=mock_gemma,
+        event_callback=mock_callback,
+        config_provider=lambda: wf_config,
+    )
+
+    dummy_frame = b"\xff\xd8\xff\xe0\x00\x10JFIF"
+    await processor._analyze_frame(frame_bytes_data=dummy_frame, video_timestamp_sec=10.0)
+
+    # Gemini must not be called; Gemma deep analyze was called
+    mock_gemini_analyzer.analyze_frame.assert_not_called()
+    mock_gemma.deep_analyze_frame.assert_called_once()
+
+    # Must stay online, not in ALERT
+    assert processor.config.status == StreamStatus.ONLINE
+    assert len(callback_events) == 1
+    assert callback_events[0].threat_level == ThreatLevel.NONE
+    assert callback_events[0].category == IncidentCategory.CLEAR
+
+
+@pytest.mark.asyncio
+async def test_tier2_gemma_without_tier1_below_threshold_suppressed(
+    stream_config: DroneStreamConfig,
+    tier1_disabled_settings: Settings,
+    mock_gemini_analyzer: MagicMock,
+) -> None:
+    """Verify that a potential threat below threshold is suppressed to ONLINE and NONE threat."""
+    mock_gemma = MagicMock(spec=GemmaTriageClient)
+    # Gemma reports low confidence anomaly 0.60, while threshold is 0.75
+    mock_gemma.deep_analyze_frame = AsyncMock(
+        return_value=AnalysisResult(
+            suspicious_activity_detected=True,
+            threat_level=ThreatLevel.LOW,
+            category=IncidentCategory.SUSPICIOUS_BEHAVIOR,
+            summary="Ambiguous shadow near walkway",
+            description="Ambiguous shadow near walkway",
+            confidence_score=0.60,
+            bounding_boxes=[],
+        )
+    )
+
+    callback_events: list[IncidentEvent] = []
+
+    async def mock_callback(event: IncidentEvent) -> None:
+        callback_events.append(event)
+
+    wf_config = WorkflowConfig(
+        enable_tier1_gemma=False,
+        escalation_target=EscalationTarget.GEMMA,
+        gemma_triage_threshold=0.75,
+    )
+
+    processor = DroneStreamProcessor(
+        config=stream_config,
+        settings=tier1_disabled_settings,
+        analyzer=mock_gemini_analyzer,
+        gemma_client=mock_gemma,
+        event_callback=mock_callback,
+        config_provider=lambda: wf_config,
+    )
+
+    dummy_frame = b"\xff\xd8\xff\xe0\x00\x10JFIF"
+    await processor._analyze_frame(frame_bytes_data=dummy_frame, video_timestamp_sec=12.0)
+
+    # Suppressed below threshold
+    assert processor.config.status == StreamStatus.ONLINE
+    assert len(callback_events) == 1
+    assert callback_events[0].threat_level == ThreatLevel.NONE
+    assert callback_events[0].category == IncidentCategory.CLEAR
+
+
+@pytest.mark.asyncio
+async def test_tier2_gemma_without_tier1_above_threshold_alerts(
+    stream_config: DroneStreamConfig,
+    tier1_disabled_settings: Settings,
+    mock_gemini_analyzer: MagicMock,
+) -> None:
+    """Verify that a threat meeting or exceeding threshold triggers ALERT status and event."""
+    mock_gemma = MagicMock(spec=GemmaTriageClient)
+    mock_gemma.deep_analyze_frame = AsyncMock(
+        return_value=AnalysisResult(
+            suspicious_activity_detected=True,
+            threat_level=ThreatLevel.HIGH,
+            category=IncidentCategory.PERIMETER_BREACH,
+            summary="Fence breach detected",
+            description="Person breaching security fence.",
+            confidence_score=0.88,
+            bounding_boxes=[
+                {"ymin": 0.1, "xmin": 0.1, "ymax": 0.4, "xmax": 0.4, "label": "trespasser"}
+            ],
+        )
+    )
+
+    callback_events: list[IncidentEvent] = []
+
+    async def mock_callback(event: IncidentEvent) -> None:
+        callback_events.append(event)
+
+    wf_config = WorkflowConfig(
+        enable_tier1_gemma=False,
+        escalation_target=EscalationTarget.GEMMA,
+        gemma_triage_threshold=0.70,
+    )
+
+    processor = DroneStreamProcessor(
+        config=stream_config,
+        settings=tier1_disabled_settings,
+        analyzer=mock_gemini_analyzer,
+        gemma_client=mock_gemma,
+        event_callback=mock_callback,
+        config_provider=lambda: wf_config,
+    )
+
+    dummy_frame = b"\xff\xd8\xff\xe0\x00\x10JFIF"
+    await processor._analyze_frame(frame_bytes_data=dummy_frame, video_timestamp_sec=14.0)
+
+    # Dispatched alert
+    assert processor.config.status == StreamStatus.ALERT
+    assert len(callback_events) == 1
+    assert callback_events[0].threat_level == ThreatLevel.HIGH
+    assert callback_events[0].category == IncidentCategory.PERIMETER_BREACH
+    assert len(callback_events[0].bounding_boxes) == 1

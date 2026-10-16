@@ -178,22 +178,26 @@ export default function App() {
         onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
       />
 
-      {activeTab === 'dashboard' ? (
-        <main className="dashboard-grid">
-          <StreamGrid
-            streams={streams}
-            activeAlerts={alerts}
-            telemetry={telemetry}
-            onUnregisterStream={handleUnregisterStream}
-            onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
-          />
-          <AlertSidebar alerts={alerts} onAcknowledge={handleAcknowledge} />
-        </main>
-      ) : (
-        <main className="admin-page-container">
-          <AdminView />
-        </main>
-      )}
+      <main
+        className="dashboard-grid"
+        style={{ display: activeTab === 'dashboard' ? 'grid' : 'none' }}
+      >
+        <StreamGrid
+          streams={streams}
+          activeAlerts={alerts}
+          telemetry={telemetry}
+          onUnregisterStream={handleUnregisterStream}
+          onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
+        />
+        <AlertSidebar alerts={alerts} onAcknowledge={handleAcknowledge} />
+      </main>
+
+      <main
+        className="admin-page-container"
+        style={{ display: activeTab === 'admin' ? 'block' : 'none' }}
+      >
+        <AdminView />
+      </main>
 
       <RegisterStreamModal
         isOpen={isRegisterModalOpen}

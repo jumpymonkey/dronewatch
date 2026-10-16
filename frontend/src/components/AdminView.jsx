@@ -178,6 +178,25 @@ export default function AdminView() {
               <span>Unsaved Changes</span>
             </div>
           )}
+          <button
+            type="button"
+            className="btn-primary header-save-btn"
+            disabled={saving || !isDirty}
+            onClick={handleSave}
+            style={{ marginLeft: '0.75rem', padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}
+          >
+            {saving ? (
+              <>
+                <RefreshCw className="spin-icon" size={14} />
+                <span>Saving...</span>
+              </>
+            ) : (
+              <>
+                <Save size={14} />
+                <span>Save Settings</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -245,42 +264,48 @@ export default function AdminView() {
                 placeholder="detect campus security anomalies, unauthorized persons, or perimeter breaches; answer safe or alert"
               />
             </div>
+          </div>
 
-            <div className="form-group threshold-group">
-              <div className="label-with-hint">
-                <label htmlFor="gemma-threshold">Escalation Confidence Threshold</label>
-                <span className="hint-text">
-                  Cutoff score (0.0 to 1.0) above which a frame escalates to Tier 2
-                </span>
+          <div
+            className="form-group threshold-group"
+            style={{
+              marginTop: '1.25rem',
+              paddingTop: '1.25rem',
+              borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            <div className="label-with-hint">
+              <label htmlFor="gemma-threshold">Alert & Escalation Confidence Threshold</label>
+              <span className="hint-text">
+                Confidence cutoff score (0.10 to 0.95) required to escalate (Tier 1) and dispatch alerts (Tier 2)
+              </span>
+            </div>
+            <div className="threshold-control-row">
+              <input
+                id="gemma-threshold"
+                type="range"
+                min="0.10"
+                max="0.95"
+                step="0.05"
+                className="threshold-slider"
+                value={config?.gemma_triage_threshold || 0.5}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    gemma_triage_threshold: parseFloat(e.target.value),
+                  }))
+                }
+              />
+              <div className="threshold-value-badge">
+                {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
               </div>
-              <div className="threshold-control-row">
-                <input
-                  id="gemma-threshold"
-                  type="range"
-                  min="0.10"
-                  max="0.95"
-                  step="0.05"
-                  className="threshold-slider"
-                  value={config?.gemma_triage_threshold || 0.5}
-                  disabled={!config?.enable_tier1_gemma}
-                  onChange={(e) =>
-                    setConfig((prev) => ({
-                      ...prev,
-                      gemma_triage_threshold: parseFloat(e.target.value),
-                    }))
-                  }
-                />
-                <div className="threshold-value-badge">
-                  {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
-                </div>
-                <span className="threshold-level-tag">
-                  {config?.gemma_triage_threshold <= 0.35
-                    ? 'Sensitive (High Escalation Rate)'
-                    : config?.gemma_triage_threshold >= 0.70
-                    ? 'Strict (Escalate High-Confidence Only)'
-                    : 'Balanced Default'}
-                </span>
-              </div>
+              <span className="threshold-level-tag">
+                {config?.gemma_triage_threshold <= 0.35
+                  ? 'Sensitive (High Alert/Escalation Rate)'
+                  : config?.gemma_triage_threshold >= 0.70
+                  ? 'Strict (High-Confidence Alerts Only)'
+                  : 'Balanced Default'}
+              </span>
             </div>
           </div>
         </div>

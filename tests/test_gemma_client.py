@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from dronewatch.config import Settings
+from dronewatch.models.events import IncidentCategory, ThreatLevel
 from dronewatch.models.triage import GemmaTriageResponse
 from dronewatch.services.gemma_client import GemmaTriageClient
 
@@ -260,3 +261,79 @@ async def test_circuit_breaker_recovery(gemma_settings: Settings) -> None:
         res2 = await client.triage_frame(frame_bytes=b"bytes", drone_id="Drone-01")
         assert not res2.escalate_to_gemini
         assert client._circuit_tripped is False
+
+
+def test_parse_deep_analysis_text_json(gemma_settings: Settings) -> None:
+    """Verify Gemma deep analysis parses structured JSON enclosed in markdown fences."""
+    client = GemmaTriageClient(gemma_settings)
+    raw_output = """```json
+{
+  "suspicious_activity_detected": true,
+  "threat_level": "HIGH",
+  "category": "PERIMETER_BREACH",
+  "summary": "Individual climbing over north perimeter fence.",
+  "description": "Person in dark clothing detected climbing over fence near gate 4.",
+  "confidence_score": 0.91,
+  "bounding_boxes": [
+    {
+      "box_2d": [120, 230, 450, 600],
+      "label": "trespasser climbing fence"
+    }
+  ]
+}
+```"""
+    result = client._parse_deep_analysis_text(raw_output)
+
+    assert result.suspicious_activity_detected is True
+    assert result.threat_level == ThreatLevel.HIGH
+    assert result.category == IncidentCategory.PERIMETER_BREACH
+    assert "climbing over north perimeter fence" in result.summary
+    assert result.confidence_score == 0.91
+    assert len(result.bounding_boxes) == 1
+    assert result.bounding_boxes[0].label == "trespasser climbing fence"
+    assert result.bounding_boxes[0].ymin == 0.12
+
+
+def test_parse_deep_analysis_text_benign_markdown(gemma_settings: Settings) -> None:
+    """Verify markdown headers and benign prose default to ThreatLevel.NONE without alert spam."""
+    client = GemmaTriageClient(gemma_settings)
+    raw_output = """## Drone Security Surveillance Analysis
+
+The aerial surveillance view of the campus pathway shows routine pedestrian activity.
+The scene is clear and safe with no threats or security anomalies detected."""
+
+    result = client._parse_deep_analysis_text(raw_output)
+
+    assert result.threat_level == ThreatLevel.NONE
+    assert result.category == IncidentCategory.CLEAR
+    assert result.suspicious_activity_detected is False
+    assert result.confidence_score >= 0.85
+    assert "clear" in result.summary.lower() or "routine" in result.summary.lower()
+
+
+def test_parse_deep_analysis_text_negated_threat(gemma_settings: Settings) -> None:
+    """Verify negated threat phrases are correctly recognized as benign."""
+    client = GemmaTriageClient(gemma_settings)
+    raw_output = (
+        "Surveillance pass completed. No perimeter breach, "
+        "no unauthorized persons, zero anomalies found."
+    )
+
+    result = client._parse_deep_analysis_text(raw_output)
+
+    assert result.threat_level == ThreatLevel.NONE
+    assert result.category == IncidentCategory.CLEAR
+    assert result.suspicious_activity_detected is False
+
+
+def test_parse_deep_analysis_text_active_threat(gemma_settings: Settings) -> None:
+    """Verify unstructured active threat text classifies appropriately in fallback parser."""
+    client = GemmaTriageClient(gemma_settings)
+    raw_output = "Perimeter breach detected! A trespasser is climbing the security fence."
+
+    result = client._parse_deep_analysis_text(raw_output)
+
+    assert result.threat_level == ThreatLevel.HIGH
+    assert result.category == IncidentCategory.PERIMETER_BREACH
+    assert result.suspicious_activity_detected is True
+    assert result.confidence_score >= 0.85

@@ -381,31 +381,56 @@ class DroneStreamProcessor:
                     prompt=workflow_config.gemini_escalation_prompt,
                 )
 
-            threat_active = (
+            is_potential_threat = (
                 analysis.suspicious_activity_detected or analysis.threat_level != ThreatLevel.NONE
+            )
+            threat_active = is_potential_threat and (
+                analysis.confidence_score >= workflow_config.gemma_triage_threshold
             )
 
             if threat_active:
                 self.config.status = StreamStatus.ALERT
+                threat_level = analysis.threat_level
+                category = analysis.category
+                bounding_boxes = analysis.bounding_boxes
                 logger.warning(
-                    "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s",
+                    "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s "
+                    "(confidence=%.2f >= threshold=%.2f)",
                     self.config.drone_id,
                     formatted_timecode or "N/A",
-                    analysis.threat_level,
+                    threat_level,
                     analysis.summary,
+                    analysis.confidence_score,
+                    workflow_config.gemma_triage_threshold,
                 )
             else:
                 self.config.status = StreamStatus.ONLINE
+                threat_level = ThreatLevel.NONE
+                category = IncidentCategory.CLEAR
+                bounding_boxes = []
+                if is_potential_threat:
+                    logger.info(
+                        "Suppressed below-threshold threat from Drone %s [TC %s]: [%s] %s "
+                        "(confidence=%.2f < threshold=%.2f)",
+                        self.config.drone_id,
+                        formatted_timecode or "N/A",
+                        analysis.threat_level,
+                        analysis.summary,
+                        analysis.confidence_score,
+                        workflow_config.gemma_triage_threshold,
+                    )
 
             event = IncidentEvent(
                 drone_id=self.config.drone_id,
                 timestamp=datetime.now(UTC),
                 location=Location(zone_name=self.config.zone_name),
-                threat_level=analysis.threat_level,
-                category=analysis.category,
-                description=analysis.summary or analysis.description,
+                threat_level=threat_level,
+                category=category,
+                description=analysis.summary
+                or analysis.description
+                or "Routine aerial surveillance - zone clear.",
                 confidence_score=analysis.confidence_score,
-                bounding_boxes=analysis.bounding_boxes,
+                bounding_boxes=bounding_boxes,
                 snapshot_uri=None,
                 video_timestamp_seconds=video_timestamp_sec,
                 video_timestamp_formatted=formatted_timecode,

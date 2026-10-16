@@ -41,11 +41,7 @@ Output strictly formatted JSON following this schema:
   ]
 }"""
 
-DEFAULT_GEMMA_ESCALATION_PROMPT: str = """\
-Analyze this drone security surveillance frame for suspicious campus activity.
-Identify security threats, unauthorized personnel, vehicles in pedestrian areas,
-or perimeter breaches. Provide a concise situational assessment describing any
-detected anomalies, their severity (CLEAR, LOW, MEDIUM, HIGH, CRITICAL), and category."""
+DEFAULT_GEMMA_ESCALATION_PROMPT: str = DEFAULT_GEMINI_ESCALATION_PROMPT
 
 
 class EscalationTarget(StrEnum):
@@ -132,4 +128,3 @@ class WorkflowConfigUpdate(BaseModel):
         if isinstance(v, str):
             return v.upper()
         return v
-

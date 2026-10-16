@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ThreatLevel(StrEnum):
@@ -50,6 +50,39 @@ class BoundingBox(BaseModel):
     label: str = Field(
         default="detected_object", description="Object class label e.g., person, vehicle, bag"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_box_2d(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if (
+                "box_2d" in data
+                and isinstance(data["box_2d"], (list, tuple))
+                and len(data["box_2d"]) == 4
+            ):
+                b = data["box_2d"]
+                scale = 1000.0 if any(float(v) > 1.0 for v in b) else 1.0
+                return {
+                    "ymin": round(float(b[0]) / scale, 4),
+                    "xmin": round(float(b[1]) / scale, 4),
+                    "ymax": round(float(b[2]) / scale, 4),
+                    "xmax": round(float(b[3]) / scale, 4),
+                    "label": str(data.get("label", "detected_object")),
+                }
+            if all(k in data for k in ("ymin", "xmin", "ymax", "xmax")):
+                scale = (
+                    1000.0
+                    if any(float(data[k]) > 1.0 for k in ("ymin", "xmin", "ymax", "xmax"))
+                    else 1.0
+                )
+                return {
+                    "ymin": round(float(data["ymin"]) / scale, 4),
+                    "xmin": round(float(data["xmin"]) / scale, 4),
+                    "ymax": round(float(data["ymax"]) / scale, 4),
+                    "xmax": round(float(data["xmax"]) / scale, 4),
+                    "label": str(data.get("label", "detected_object")),
+                }
+        return data
 
 
 class Location(BaseModel):

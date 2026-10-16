@@ -1,6 +1,7 @@
 """Tier 1 Gemma 4 vision triage client for Google Cloud Run (Option A: vLLM)."""
 
 import base64
+import json
 import logging
 import os
 import re
@@ -11,7 +12,12 @@ from urllib.parse import urlparse
 import httpx
 
 from dronewatch.config import Settings
-from dronewatch.models.events import AnalysisResult, IncidentCategory, ThreatLevel
+from dronewatch.models.events import (
+    AnalysisResult,
+    BoundingBox,
+    IncidentCategory,
+    ThreatLevel,
+)
 from dronewatch.models.triage import GemmaTriageResponse
 
 logger = logging.getLogger(__name__)
@@ -386,77 +392,222 @@ class GemmaTriageClient:
                 model_name=self.model_name,
             )
 
-    def _parse_deep_analysis_text(
-        self, text: str
-    ) -> tuple[ThreatLevel, IncidentCategory, str, str, float]:
-        """Parse natural language deep analysis text from Gemma 4 into structured fields."""
+    def _extract_json_analysis(self, text: str) -> AnalysisResult | None:
+        """Attempt to extract and validate JSON schema from Gemma response."""
         cleaned = text.strip()
-        lower = cleaned.lower()
+        json_str: str | None = None
+        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+        if fence_match:
+            json_str = fence_match.group(1).strip()
+        else:
+            first_brace = cleaned.find("{")
+            last_brace = cleaned.rfind("}")
+            if first_brace != -1 and last_brace > first_brace:
+                json_str = cleaned[first_brace : last_brace + 1].strip()
 
-        # Determine threat level
-        if any(
-            w in lower
-            for w in ("critical", "weapon", "active shooter", "armed", "explosion", "fire")
-        ):
-            threat_level = ThreatLevel.CRITICAL
-            conf = 0.95
-        elif any(
-            w in lower
-            for w in ("high", "breach", "forced entry", "perimeter breach", "climbing fence")
-        ):
-            threat_level = ThreatLevel.HIGH
-            conf = 0.90
-        elif any(
-            w in lower
-            for w in ("medium", "suspicious", "trespassing", "unauthorized", "loitering")
-        ):
-            threat_level = ThreatLevel.MEDIUM
-            conf = 0.85
-        elif any(w in lower for w in ("low", "minor", "parking violation", "traffic")):
-            threat_level = ThreatLevel.LOW
-            conf = 0.80
-        elif any(
-            w in lower
-            for w in (
-                "clear",
-                "safe",
-                "normal",
-                "benign",
-                "routine",
-                "no threat",
-                "no anomaly",
+        if not json_str:
+            return None
+
+        try:
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                return None
+
+            raw_threat = str(data.get("threat_level", "CLEAR")).upper().strip()
+            threat_mapping: dict[str, ThreatLevel] = {
+                "CLEAR": ThreatLevel.NONE,
+                "NONE": ThreatLevel.NONE,
+                "LOW": ThreatLevel.LOW,
+                "MEDIUM": ThreatLevel.MEDIUM,
+                "HIGH": ThreatLevel.HIGH,
+                "CRITICAL": ThreatLevel.CRITICAL,
+            }
+            threat_level = threat_mapping.get(raw_threat, ThreatLevel.NONE)
+
+            raw_cat = str(data.get("category", "CLEAR")).upper().strip()
+            category_mapping: dict[str, IncidentCategory] = {
+                "CLEAR": IncidentCategory.CLEAR,
+                "PERIMETER_BREACH": IncidentCategory.PERIMETER_BREACH,
+                "LOITERING": IncidentCategory.LOITERING,
+                "UNATTENDED_OBJECT": IncidentCategory.UNATTENDED_OBJECT,
+                "TRAFFIC_VIOLATION": IncidentCategory.TRAFFIC_VIOLATION,
+                "HAZARD": IncidentCategory.HAZARD,
+                "SUSPICIOUS_BEHAVIOR": IncidentCategory.SUSPICIOUS_BEHAVIOR,
+            }
+            category = category_mapping.get(
+                raw_cat,
+                IncidentCategory.CLEAR
+                if threat_level == ThreatLevel.NONE
+                else IncidentCategory.SUSPICIOUS_BEHAVIOR,
             )
-        ):
+
+            suspicious = bool(data.get("suspicious_activity_detected", False))
+            if threat_level == ThreatLevel.NONE:
+                suspicious = False
+                category = IncidentCategory.CLEAR
+            elif not suspicious:
+                threat_level = ThreatLevel.NONE
+                category = IncidentCategory.CLEAR
+
+            summary = str(data.get("summary", "")).strip()
+            if not summary:
+                summary = (
+                    "Routine aerial surveillance - zone clear."
+                    if threat_level == ThreatLevel.NONE
+                    else f"{category.value} detected."
+                )
+
+            description = str(data.get("description", "")).strip() or summary
+
+            try:
+                confidence = float(data.get("confidence_score", 0.90))
+                confidence = max(0.0, min(1.0, confidence))
+            except (ValueError, TypeError):
+                confidence = 0.90
+
+            raw_boxes = data.get("bounding_boxes", [])
+            bounding_boxes: list[BoundingBox] = []
+            if isinstance(raw_boxes, list):
+                for b in raw_boxes:
+                    if isinstance(b, dict):
+                        try:
+                            bounding_boxes.append(BoundingBox.model_validate(b))
+                        except Exception:
+                            continue
+
+            return AnalysisResult(
+                suspicious_activity_detected=suspicious,
+                threat_level=threat_level,
+                category=category,
+                summary=summary,
+                description=description,
+                confidence_score=confidence,
+                bounding_boxes=bounding_boxes,
+            )
+        except Exception as parse_err:
+            logger.debug("Failed to parse extracted JSON candidate from Gemma: %s", parse_err)
+            return None
+
+    def _parse_deep_analysis_text(self, text: str) -> AnalysisResult:
+        """Parse natural language deep analysis text from Gemma 4 into structured AnalysisResult."""
+        # 1. Primary: JSON structured extraction
+        json_result = self._extract_json_analysis(text)
+        if json_result is not None:
+            return json_result
+
+        # 2. Secondary: Fallback natural language text analysis
+        cleaned = text.strip()
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        content_lines = [line for line in lines if not line.startswith("#")]
+        content_text = " ".join(content_lines) if content_lines else cleaned
+        lower = content_text.lower()
+
+        # Check for explicit negation or clear statements
+        has_negated_threat = bool(
+            re.search(
+                r"\b(?:no|zero|without|not)\s+(?:suspicious|threat|anomaly|breach|unauthorized|danger|hazard|incident|concern)s?\b",
+                lower,
+            )
+        )
+        is_explicitly_clear = any(
+            phrase in lower
+            for phrase in (
+                "clear",
+                "normal",
+                "routine",
+                "benign",
+                "safe",
+                "all clear",
+                "zone clear",
+                "no activity detected",
+                "routine surveillance",
+            )
+        )
+
+        threat_level = ThreatLevel.NONE
+        category = IncidentCategory.CLEAR
+        suspicious = False
+        conf = 0.90
+
+        if not has_negated_threat:
+            if any(
+                w in lower
+                for w in ("active shooter", "weapon", "explosion", "armed person", "fire outbreak")
+            ):
+                threat_level = ThreatLevel.CRITICAL
+                category = IncidentCategory.HAZARD
+                suspicious = True
+                conf = 0.95
+            elif any(
+                w in lower
+                for w in (
+                    "perimeter breach",
+                    "forced entry",
+                    "climbing fence",
+                    "scaling fence",
+                    "fence breach",
+                )
+            ):
+                threat_level = ThreatLevel.HIGH
+                category = IncidentCategory.PERIMETER_BREACH
+                suspicious = True
+                conf = 0.90
+            elif any(
+                w in lower
+                for w in (
+                    "unauthorized person",
+                    "trespassing",
+                    "trespasser",
+                    "loitering after hours",
+                    "vehicle on walkway",
+                )
+            ):
+                threat_level = ThreatLevel.MEDIUM
+                category = IncidentCategory.SUSPICIOUS_BEHAVIOR
+                suspicious = True
+                conf = 0.85
+            elif any(
+                w in lower
+                for w in (
+                    "parking violation",
+                    "traffic violation",
+                    "unattended bag",
+                    "suspicious package",
+                )
+            ):
+                threat_level = ThreatLevel.LOW
+                category = (
+                    IncidentCategory.TRAFFIC_VIOLATION
+                    if "traffic" in lower or "parking" in lower
+                    else IncidentCategory.UNATTENDED_OBJECT
+                )
+                suspicious = True
+                conf = 0.80
+
+        # Baseline: normal/benign if negated or not explicitly verified
+        if not suspicious or is_explicitly_clear or has_negated_threat:
             threat_level = ThreatLevel.NONE
-            conf = 0.95
-        else:
-            threat_level = ThreatLevel.MEDIUM
-            conf = 0.75
-
-        # Determine category
-        if any(w in lower for w in ("breach", "fence", "gate", "perimeter", "climbing")):
-            category = IncidentCategory.PERIMETER_BREACH
-        elif any(w in lower for w in ("loiter", "standing near", "after hours loitering")):
-            category = IncidentCategory.LOITERING
-        elif any(w in lower for w in ("unattended", "bag", "package", "backpack", "suitcase")):
-            category = IncidentCategory.UNATTENDED_OBJECT
-        elif any(w in lower for w in ("traffic", "parked", "parking", "vehicle", "fire lane")):
-            category = IncidentCategory.TRAFFIC_VIOLATION
-        elif any(w in lower for w in ("hazard", "spill", "fire", "smoke", "danger")):
-            category = IncidentCategory.HAZARD
-        elif threat_level == ThreatLevel.NONE:
             category = IncidentCategory.CLEAR
-        else:
-            category = IncidentCategory.SUSPICIOUS_BEHAVIOR
+            suspicious = False
+            conf = 0.95
 
-        # Summary: First sentence or up to first newline / 140 chars
-        first_line = cleaned.split("\n")[0].strip()
-        if "." in first_line:
-            summary = first_line.split(".")[0].strip() + "."
+        if suspicious:
+            first_sentence = (
+                content_lines[0] if content_lines else "Suspicious campus activity detected."
+            )
+            summary = first_sentence.split(".")[0].strip() + "."
         else:
-            summary = first_line[:140]
+            summary = "Routine aerial surveillance - zone clear."
 
-        return threat_level, category, summary, cleaned, conf
+        return AnalysisResult(
+            suspicious_activity_detected=suspicious,
+            threat_level=threat_level,
+            category=category,
+            summary=summary,
+            description=content_text if content_text else summary,
+            confidence_score=conf,
+            bounding_boxes=[],
+        )
 
     async def deep_analyze_frame(
         self,
@@ -498,8 +649,8 @@ class GemmaTriageClient:
                         ],
                     }
                 ],
-                "max_tokens": 256,
-                "temperature": 0.2,
+                "max_tokens": 600,
+                "temperature": 0.1,
             }
 
             headers = {
@@ -534,25 +685,14 @@ class GemmaTriageClient:
                 latency_ms,
             )
 
-            threat_level, category, summary, description, conf = (
-                self._parse_deep_analysis_text(raw_content)
-            )
-
-            return AnalysisResult(
-                suspicious_activity_detected=(threat_level != ThreatLevel.NONE),
-                threat_level=threat_level,
-                category=category,
-                summary=summary,
-                description=description,
-                confidence_score=conf,
-                bounding_boxes=[],
-                raw_payload={
-                    "tier": 2,
-                    "model": self.model_name,
-                    "latency_ms": latency_ms,
-                    "raw_output": raw_content,
-                },
-            )
+            analysis = self._parse_deep_analysis_text(raw_content)
+            analysis.raw_payload = {
+                "tier": 2,
+                "model": self.model_name,
+                "latency_ms": latency_ms,
+                "raw_output": raw_content,
+            }
+            return analysis
         except Exception as err:
             logger.error("Tier 2 Gemma deep analysis error: %s", err)
             return self._fallback_deep_analysis(str(err))
