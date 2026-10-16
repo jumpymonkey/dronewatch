@@ -19,45 +19,17 @@ from dronewatch.models.events import (
     ThreatLevel,
 )
 from dronewatch.models.triage import GemmaTriageResponse
+from dronewatch.models.workflow_config import (
+    DEFAULT_ALERT_KEYWORDS,
+    DEFAULT_BENIGN_KEYWORDS,
+    AmbiguityPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
-# Keywords triggering Tier 2 Gemini escalation
-ALERT_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "alert",
-        "suspicious",
-        "anomalous",
-        "anomaly",
-        "intruder",
-        "unauthorized",
-        "trespass",
-        "trespassing",
-        "breach",
-        "danger",
-        "hazard",
-        "threat",
-        "weapon",
-        "climbing",
-        "fire",
-        "smoke",
-        "loitering",
-    }
-)
-
-BENIGN_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "safe",
-        "normal",
-        "benign",
-        "clear",
-        "empty",
-        "routine",
-        "authorized",
-        "pedestrian",
-        "walkway",
-    }
-)
+# Default keywords for backward compatibility with external imports
+ALERT_KEYWORDS: frozenset[str] = DEFAULT_ALERT_KEYWORDS
+BENIGN_KEYWORDS: frozenset[str] = DEFAULT_BENIGN_KEYWORDS
 
 
 class GemmaTriageClient:
@@ -77,17 +49,8 @@ class GemmaTriageClient:
         self.timeout = settings.gemma_timeout_seconds
         self.prompt = settings.gemma_triage_prompt
 
-        # Determine target endpoint (vLLM OpenAI-compatible endpoint)
-        if self.service_url:
-            parsed = urlparse(self.service_url)
-            self.audience = f"{parsed.scheme}://{parsed.netloc}"
-            if "/v1/" not in parsed.path:
-                self.endpoint = f"{self.service_url.rstrip('/')}/v1/chat/completions"
-            else:
-                self.endpoint = self.service_url
-        else:
-            self.audience = ""
-            self.endpoint = ""
+        # Determine target endpoint and audience
+        self.endpoint, self.audience = self._resolve_endpoint_and_audience(self.service_url)
 
         # Initialize or reuse HTTP client
         self._client = client or httpx.AsyncClient(
@@ -98,24 +61,44 @@ class GemmaTriageClient:
 
         # Cached OIDC token state
         self._cached_token: str | None = None
+        self._cached_audience: str = ""
         self._token_expiry_timestamp: float = 0.0
 
         # Circuit breaker state
         self._circuit_tripped: bool = False
+
+    @staticmethod
+    def _resolve_endpoint_and_audience(service_url: str) -> tuple[str, str]:
+        """Resolve OpenAI-compatible vLLM endpoint and audience from service URL."""
+        cleaned = service_url.strip()
+        if not cleaned:
+            return "", ""
+        parsed = urlparse(cleaned)
+        audience = f"{parsed.scheme}://{parsed.netloc}"
+        if "/v1/" not in parsed.path:
+            endpoint = f"{cleaned.rstrip('/')}/v1/chat/completions"
+        else:
+            endpoint = cleaned
+        return endpoint, audience
 
     async def aclose(self) -> None:
         """Close underlying HTTP client resources."""
         if self._owns_client and not self._client.is_closed:
             await self._client.aclose()
 
-    def _get_oidc_token(self) -> str | None:
+    def _get_oidc_token(self, target_audience: str | None = None) -> str | None:
         """Fetch Google IAM OIDC token for Cloud Run service-to-service auth."""
-        now = time.time()
-        if self._cached_token and now < self._token_expiry_timestamp:
-            return self._cached_token
-
-        if not self.audience:
+        aud = target_audience or self.audience
+        if not aud:
             return None
+
+        now = time.time()
+        if (
+            self._cached_token
+            and now < self._token_expiry_timestamp
+            and self._cached_audience == aud
+        ):
+            return self._cached_token
 
         # 1. On Cloud Run / GCP environments, fetch directly from metadata server
         if os.environ.get("K_SERVICE") or os.environ.get("GAE_SERVICE"):
@@ -124,8 +107,9 @@ class GemmaTriageClient:
                 import google.oauth2.id_token
 
                 auth_req = google.auth.transport.requests.Request()
-                token = google.oauth2.id_token.fetch_id_token(auth_req, self.audience)
+                token = google.oauth2.id_token.fetch_id_token(auth_req, aud)
                 self._cached_token = token
+                self._cached_audience = aud
                 # Refresh token 5 minutes before typical 60m expiry
                 self._token_expiry_timestamp = now + 3300.0
                 return token
@@ -147,6 +131,7 @@ class GemmaTriageClient:
                 ).strip()
                 if token:
                     self._cached_token = token
+                    self._cached_audience = aud
                     self._token_expiry_timestamp = now + 1800.0
                     return token
         except Exception as sub_ex:
@@ -154,17 +139,43 @@ class GemmaTriageClient:
 
         return None
 
-    def _parse_triage_text(self, text: str) -> tuple[bool, float, list[str]]:
+    def _parse_triage_text(
+        self,
+        text: str,
+        alert_keywords: list[str] | set[str] | frozenset[str] | None = None,
+        benign_keywords: list[str] | set[str] | frozenset[str] | None = None,
+        ambiguity_policy: AmbiguityPolicy | str | None = None,
+    ) -> tuple[bool, float, list[str]]:
         """Parse raw model output to determine threat classification and score.
 
         Args:
             text: Raw generated output string from Gemma 4.
+            alert_keywords: Optional keywords triggering alert score.
+            benign_keywords: Optional keywords indicating benign status.
+            ambiguity_policy: Policy when output is ambiguous (FAIL_SAFE or CONSERVATIVE).
+
         Returns:
             Tuple of (is_alert, confidence_score, matching_tags).
         """
         cleaned = text.lower().strip()
-        matched_alerts = [kw for kw in ALERT_KEYWORDS if kw in cleaned]
-        matched_benign = [kw for kw in BENIGN_KEYWORDS if kw in cleaned]
+        active_alerts = (
+            [kw.lower() for kw in alert_keywords]
+            if alert_keywords is not None
+            else list(ALERT_KEYWORDS)
+        )
+        active_benign = (
+            [kw.lower() for kw in benign_keywords]
+            if benign_keywords is not None
+            else list(BENIGN_KEYWORDS)
+        )
+        policy = (
+            AmbiguityPolicy(ambiguity_policy)
+            if ambiguity_policy is not None
+            else AmbiguityPolicy.FAIL_SAFE
+        )
+
+        matched_alerts = [kw for kw in active_alerts if kw in cleaned]
+        matched_benign = [kw for kw in active_benign if kw in cleaned]
 
         terminal_safe = bool(re.search(r"\bsafe[\.!]?$", cleaned))
         terminal_alert = bool(re.search(r"\balert[\.!]?$", cleaned))
@@ -174,7 +185,7 @@ class GemmaTriageClient:
             if k in cleaned
         ]
 
-        if terminal_safe and not critical_threats:
+        if terminal_safe and not critical_threats and not matched_alerts:
             benign_tags = ["safe"] + [kw for kw in matched_benign if kw != "safe"]
             return False, 0.05, benign_tags
 
@@ -190,8 +201,10 @@ class GemmaTriageClient:
         if matched_benign:
             return False, 0.05, matched_benign
 
-        # Default fallback if response is ambiguous
-        return False, 0.20, ["unclassified"]
+        # Handling policy when output is ambiguous / unclassified
+        if policy == AmbiguityPolicy.FAIL_SAFE:
+            return True, 0.80, ["unclassified", "ambiguous_fail_safe"]
+        return False, 0.20, ["unclassified", "ambiguous_conservative"]
 
     async def triage_frame(
         self,
@@ -201,6 +214,14 @@ class GemmaTriageClient:
         request_scene_description: bool = False,
         prompt: str | None = None,
         threshold: float | None = None,
+        gemma_service_url: str | None = None,
+        gemma_model: str | None = None,
+        gemma_timeout_seconds: float | None = None,
+        alert_keywords: list[str] | set[str] | frozenset[str] | None = None,
+        benign_keywords: list[str] | set[str] | frozenset[str] | None = None,
+        ambiguity_policy: AmbiguityPolicy | str | None = None,
+        vllm_temperature: float | None = None,
+        vllm_max_tokens: int | None = None,
     ) -> GemmaTriageResponse:
         """Submit a single video frame to Tier 1 Gemma 4 for front-line triage.
 
@@ -215,14 +236,29 @@ class GemmaTriageClient:
                 summary and safe/alert verdict (for periodic UI telemetry heartbeat).
             prompt: Optional dynamic prompt overriding default triage prompt.
             threshold: Optional dynamic confidence score threshold.
+            gemma_service_url: Optional runtime service URL override.
+            gemma_model: Optional runtime model identifier override.
+            gemma_timeout_seconds: Optional runtime timeout in seconds.
+            alert_keywords: Optional keywords triggering alert score.
+            benign_keywords: Optional keywords indicating benign status.
+            ambiguity_policy: Handling policy for unclassified outputs.
+            vllm_temperature: Optional runtime sampling temperature.
+            vllm_max_tokens: Optional runtime max output tokens.
 
         Returns:
             GemmaTriageResponse evaluated against threshold.
         """
         start_time = time.perf_counter()
 
+        target_service_url = (gemma_service_url or "").strip() or self.service_url
+        endpoint, audience = self._resolve_endpoint_and_audience(target_service_url)
+        target_model = gemma_model or self.model_name
+        target_timeout = (
+            gemma_timeout_seconds if gemma_timeout_seconds is not None else self.timeout
+        )
+
         # If service URL is unset, fail open directly to Gemini
-        if not self.endpoint:
+        if not endpoint:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             return GemmaTriageResponse(
                 escalate_to_gemini=True,
@@ -233,7 +269,7 @@ class GemmaTriageClient:
                 tags=["service_url_not_configured"],
                 raw_output=None,
                 scene_description=None,
-                model_name=self.model_name,
+                model_name=target_model,
             )
 
         try:
@@ -242,15 +278,19 @@ class GemmaTriageClient:
 
             if request_scene_description:
                 prompt_text = self.settings.gemma_scene_description_prompt
+                tokens = 64
             elif prompt is not None and prompt.strip():
                 prompt_text = prompt
+                tokens = vllm_max_tokens if vllm_max_tokens is not None else 32
             else:
                 prompt_text = self.prompt
-            max_tokens = 64 if request_scene_description else 32
+                tokens = vllm_max_tokens if vllm_max_tokens is not None else 32
+
+            temp = vllm_temperature if vllm_temperature is not None else 0.0
 
             # Format OpenAI Vision / vLLM compatible payload (Option A)
             payload: dict[str, Any] = {
-                "model": self.model_name,
+                "model": target_model,
                 "messages": [
                     {
                         "role": "user",
@@ -265,8 +305,8 @@ class GemmaTriageClient:
                         ],
                     }
                 ],
-                "max_tokens": max_tokens,
-                "temperature": 0.0,
+                "max_tokens": tokens,
+                "temperature": temp,
             }
 
             headers = {
@@ -275,15 +315,15 @@ class GemmaTriageClient:
             }
 
             # Inject Google OIDC token if available
-            oidc_token = self._get_oidc_token()
+            oidc_token = self._get_oidc_token(audience)
             if oidc_token:
                 headers["Authorization"] = f"Bearer {oidc_token}"
 
             response = await self._client.post(
-                self.endpoint,
+                endpoint,
                 json=payload,
                 headers=headers,
-                timeout=self.timeout,
+                timeout=target_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -304,7 +344,12 @@ class GemmaTriageClient:
             elif "output" in data:
                 raw_content = str(data["output"])
 
-            is_alert, score, tags = self._parse_triage_text(raw_content)
+            is_alert, score, tags = self._parse_triage_text(
+                raw_content,
+                alert_keywords=alert_keywords,
+                benign_keywords=benign_keywords,
+                ambiguity_policy=ambiguity_policy,
+            )
             cutoff = threshold if threshold is not None else self.threshold
             escalate = score >= cutoff
 
@@ -348,7 +393,7 @@ class GemmaTriageClient:
                 tags=tags,
                 raw_output=raw_content,
                 scene_description=scene_description,
-                model_name=self.model_name,
+                model_name=target_model,
             )
 
         except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as exc:
@@ -376,7 +421,7 @@ class GemmaTriageClient:
                 tier1_decision="CIRCUIT_BREAKER_BYPASS",
                 tags=["circuit_breaker_fail_open"],
                 raw_output=str(exc),
-                model_name=self.model_name,
+                model_name=target_model,
             )
         except Exception as unexpected:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
@@ -389,7 +434,7 @@ class GemmaTriageClient:
                 tier1_decision="CIRCUIT_BREAKER_BYPASS",
                 tags=["circuit_breaker_unexpected_error"],
                 raw_output=str(unexpected),
-                model_name=self.model_name,
+                model_name=target_model,
             )
 
     def _extract_json_analysis(self, text: str) -> AnalysisResult | None:
@@ -509,20 +554,6 @@ class GemmaTriageClient:
                 lower,
             )
         )
-        is_explicitly_clear = any(
-            phrase in lower
-            for phrase in (
-                "clear",
-                "normal",
-                "routine",
-                "benign",
-                "safe",
-                "all clear",
-                "zone clear",
-                "no activity detected",
-                "routine surveillance",
-            )
-        )
 
         threat_level = ThreatLevel.NONE
         category = IncidentCategory.CLEAR
@@ -552,6 +583,36 @@ class GemmaTriageClient:
                 category = IncidentCategory.PERIMETER_BREACH
                 suspicious = True
                 conf = 0.90
+            elif any(
+                eq in lower
+                for eq in (
+                    "equipment",
+                    "machinery",
+                    "vehicle",
+                    "cart",
+                    "lift",
+                    "crane",
+                    "forklift",
+                    "tractor",
+                    "obstruction",
+                    "blocked",
+                )
+            ) and any(
+                path in lower
+                for path in (
+                    "walkway",
+                    "pedestrian",
+                    "sidewalk",
+                    "footpath",
+                    "pathway",
+                    "walking path",
+                    "hallway",
+                )
+            ):
+                threat_level = ThreatLevel.MEDIUM
+                category = IncidentCategory.HAZARD
+                suspicious = True
+                conf = 0.85
             elif any(
                 w in lower
                 for w in (
@@ -584,8 +645,15 @@ class GemmaTriageClient:
                 suspicious = True
                 conf = 0.80
 
-        # Baseline: normal/benign if negated or not explicitly verified
-        if not suspicious or is_explicitly_clear or has_negated_threat:
+        # Boundary regex for explicit "all clear" or routine surveillance verdicts
+        clear_pattern = (
+            r"\b(all clear|zone clear|scene is clear|area is clear|"
+            r"everything is clear|no activity detected|routine surveillance|patrol clear)\b"
+        )
+        is_explicitly_clear = bool(re.search(clear_pattern, lower))
+
+        # Baseline: normal/benign if explicitly negated or clear
+        if has_negated_threat or (not suspicious and is_explicitly_clear):
             threat_level = ThreatLevel.NONE
             category = IncidentCategory.CLEAR
             suspicious = False
@@ -614,6 +682,11 @@ class GemmaTriageClient:
         frame_bytes: bytes,
         escalation_prompt: str,
         drone_id: str = "drone-unknown",
+        gemma_service_url: str | None = None,
+        gemma_model: str | None = None,
+        gemma_timeout_seconds: float | None = None,
+        vllm_temperature: float | None = None,
+        vllm_max_tokens: int | None = None,
     ) -> AnalysisResult:
         """Perform Tier 2 deep contextual reasoning using Gemma 4 on Cloud Run.
 
@@ -621,20 +694,39 @@ class GemmaTriageClient:
             frame_bytes: JPEG/PNG encoded image bytes.
             escalation_prompt: Contextual evaluation prompt guiding Gemma 4 analysis.
             drone_id: Calling drone identifier for telemetry logging.
+            gemma_service_url: Optional runtime service URL override.
+            gemma_model: Optional runtime model identifier override.
+            gemma_timeout_seconds: Optional runtime timeout in seconds.
+            vllm_temperature: Optional sampling temperature override.
+            vllm_max_tokens: Optional max output tokens override.
 
         Returns:
             AnalysisResult structured representation.
         """
         start_time = time.perf_counter()
 
-        if not self.endpoint:
+        target_service_url = (
+            gemma_service_url.strip()
+            if gemma_service_url and gemma_service_url.strip()
+            else self.service_url
+        )
+        endpoint, audience = self._resolve_endpoint_and_audience(target_service_url)
+        target_model = gemma_model or self.model_name
+        target_timeout = (
+            gemma_timeout_seconds if gemma_timeout_seconds is not None else self.timeout
+        )
+
+        if not endpoint:
             return self._fallback_deep_analysis("Gemma service URL not configured")
 
         try:
             b64_image = base64.b64encode(frame_bytes).decode("ascii")
 
+            tokens = vllm_max_tokens if vllm_max_tokens is not None else 600
+            temp = vllm_temperature if vllm_temperature is not None else 0.1
+
             payload: dict[str, Any] = {
-                "model": self.model_name,
+                "model": target_model,
                 "messages": [
                     {
                         "role": "user",
@@ -649,23 +741,23 @@ class GemmaTriageClient:
                         ],
                     }
                 ],
-                "max_tokens": 600,
-                "temperature": 0.1,
+                "max_tokens": tokens,
+                "temperature": temp,
             }
 
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": f"DroneWatch-Escalation/2.0 ({drone_id})",
             }
-            oidc_token = self._get_oidc_token()
+            oidc_token = self._get_oidc_token(audience)
             if oidc_token:
                 headers["Authorization"] = f"Bearer {oidc_token}"
 
             response = await self._client.post(
-                self.endpoint,
+                endpoint,
                 json=payload,
                 headers=headers,
-                timeout=self.timeout,
+                timeout=target_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -686,12 +778,12 @@ class GemmaTriageClient:
             )
 
             analysis = self._parse_deep_analysis_text(raw_content)
-            analysis.model_name = self.model_name
+            analysis.model_name = target_model
             analysis.latency_ms = latency_ms
             analysis.raw_response = raw_content
             analysis.raw_payload = {
                 "tier": 2,
-                "model": self.model_name,
+                "model": target_model,
                 "latency_ms": latency_ms,
                 "raw_output": raw_content,
             }

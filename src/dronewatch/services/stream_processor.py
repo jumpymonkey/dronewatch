@@ -256,6 +256,8 @@ class DroneStreamProcessor:
             escalation_target=EscalationTarget.GEMINI,
             gemini_model=self.settings.gemini_model,
             gemma_model=self.settings.gemma_model_name,
+            gemma_service_url=self.settings.gemma_service_url,
+            gemma_timeout_seconds=self.settings.gemma_timeout_seconds,
         )
 
     async def start(self) -> None:
@@ -309,6 +311,14 @@ class DroneStreamProcessor:
                     request_scene_description=is_heartbeat,
                     prompt=workflow_config.gemma_triage_prompt,
                     threshold=workflow_config.gemma_triage_threshold,
+                    gemma_service_url=workflow_config.gemma_service_url,
+                    gemma_model=workflow_config.gemma_model,
+                    gemma_timeout_seconds=workflow_config.gemma_timeout_seconds,
+                    alert_keywords=workflow_config.alert_keywords,
+                    benign_keywords=workflow_config.benign_keywords,
+                    ambiguity_policy=workflow_config.ambiguity_policy,
+                    vllm_temperature=workflow_config.vllm_temperature,
+                    vllm_max_tokens=workflow_config.vllm_max_tokens,
                 )
                 if not triage.escalate_to_gemini:
                     if is_heartbeat:
@@ -379,13 +389,20 @@ class DroneStreamProcessor:
             if target_is_gemma:
                 source_tier = "escalation"
                 source_model = "gemma"
-                model_name = getattr(
-                    self.gemma_client, "model_name", self.settings.gemma_model_name
+                model_name = (
+                    workflow_config.gemma_model
+                    or getattr(self.gemma_client, "model_name", None)
+                    or self.settings.gemma_model_name
                 )
                 analysis = await self.gemma_client.deep_analyze_frame(
                     frame_bytes=frame_bytes_data,
                     escalation_prompt=workflow_config.gemma_escalation_prompt,
                     drone_id=self.config.drone_id,
+                    gemma_service_url=workflow_config.gemma_service_url,
+                    gemma_model=workflow_config.gemma_model,
+                    gemma_timeout_seconds=workflow_config.gemma_timeout_seconds,
+                    vllm_temperature=workflow_config.vllm_temperature,
+                    vllm_max_tokens=workflow_config.vllm_max_tokens,
                 )
             else:
                 source_tier = "escalation"

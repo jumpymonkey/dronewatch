@@ -11,7 +11,10 @@ import asyncpg
 from dronewatch.config import Settings
 from dronewatch.models.events import IncidentCategory, IncidentEvent, ThreatLevel
 from dronewatch.models.workflow_config import (
+    DEFAULT_ALERT_KEYWORDS,
+    DEFAULT_BENIGN_KEYWORDS,
     DEFAULT_GEMMA_ESCALATION_PROMPT,
+    AmbiguityPolicy,
     EscalationTarget,
     WorkflowConfig,
 )
@@ -112,6 +115,13 @@ class AlloyDBManager:
                     gemma_escalation_prompt TEXT NOT NULL,
                     gemini_model VARCHAR(64) NOT NULL DEFAULT 'gemini-3.6-flash',
                     gemma_model VARCHAR(64) NOT NULL DEFAULT 'google/gemma-4-E2B-it',
+                    gemma_service_url TEXT,
+                    gemma_timeout_seconds DOUBLE PRECISION NOT NULL DEFAULT 2.0,
+                    alert_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    benign_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ambiguity_policy VARCHAR(32) NOT NULL DEFAULT 'FAIL_SAFE',
+                    vllm_temperature DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    vllm_max_tokens INT NOT NULL DEFAULT 32,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_by VARCHAR(64) NOT NULL DEFAULT 'pilot-admin',
                     version INT NOT NULL DEFAULT 1,
@@ -122,6 +132,17 @@ class AlloyDBManager:
                     CONSTRAINT chk_threshold_range
                         CHECK (gemma_triage_threshold >= 0.0 AND gemma_triage_threshold <= 1.0)
                 );
+
+                ALTER TABLE workflow_settings
+                    ADD COLUMN IF NOT EXISTS gemma_service_url TEXT,
+                    ADD COLUMN IF NOT EXISTS gemma_timeout_seconds DOUBLE PRECISION
+                        NOT NULL DEFAULT 2.0,
+                    ADD COLUMN IF NOT EXISTS alert_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ADD COLUMN IF NOT EXISTS benign_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ADD COLUMN IF NOT EXISTS ambiguity_policy VARCHAR(32)
+                        NOT NULL DEFAULT 'FAIL_SAFE',
+                    ADD COLUMN IF NOT EXISTS vllm_temperature DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    ADD COLUMN IF NOT EXISTS vllm_max_tokens INT NOT NULL DEFAULT 32;
 
                 CREATE TABLE IF NOT EXISTS workflow_settings_history (
                     history_id BIGSERIAL PRIMARY KEY,
@@ -134,9 +155,27 @@ class AlloyDBManager:
                     gemma_escalation_prompt TEXT NOT NULL,
                     gemini_model VARCHAR(64) NOT NULL,
                     gemma_model VARCHAR(64) NOT NULL,
+                    gemma_service_url TEXT,
+                    gemma_timeout_seconds DOUBLE PRECISION NOT NULL DEFAULT 2.0,
+                    alert_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    benign_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ambiguity_policy VARCHAR(32) NOT NULL DEFAULT 'FAIL_SAFE',
+                    vllm_temperature DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    vllm_max_tokens INT NOT NULL DEFAULT 32,
                     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     changed_by VARCHAR(64) NOT NULL
                 );
+
+                ALTER TABLE workflow_settings_history
+                    ADD COLUMN IF NOT EXISTS gemma_service_url TEXT,
+                    ADD COLUMN IF NOT EXISTS gemma_timeout_seconds DOUBLE PRECISION
+                        NOT NULL DEFAULT 2.0,
+                    ADD COLUMN IF NOT EXISTS alert_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ADD COLUMN IF NOT EXISTS benign_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    ADD COLUMN IF NOT EXISTS ambiguity_policy VARCHAR(32)
+                        NOT NULL DEFAULT 'FAIL_SAFE',
+                    ADD COLUMN IF NOT EXISTS vllm_temperature DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    ADD COLUMN IF NOT EXISTS vllm_max_tokens INT NOT NULL DEFAULT 32;
                 """)
 
             # Seed default configuration if active row does not exist
@@ -151,9 +190,13 @@ class AlloyDBManager:
                         config_id, enable_tier1_gemma, gemma_triage_prompt,
                         gemma_triage_threshold, escalation_target,
                         gemini_escalation_prompt, gemma_escalation_prompt,
-                        gemini_model, gemma_model, updated_at, updated_by, version
+                        gemini_model, gemma_model, gemma_service_url,
+                        gemma_timeout_seconds, alert_keywords, benign_keywords,
+                        ambiguity_policy, vllm_temperature, vllm_max_tokens,
+                        updated_at, updated_by, version
                     ) VALUES (
-                        'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                        'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18
                     )
                     ON CONFLICT (config_id) DO NOTHING
                     """,
@@ -165,6 +208,13 @@ class AlloyDBManager:
                     default_config.gemma_escalation_prompt,
                     default_config.gemini_model,
                     default_config.gemma_model,
+                    default_config.gemma_service_url,
+                    default_config.gemma_timeout_seconds,
+                    json.dumps(default_config.alert_keywords),
+                    json.dumps(default_config.benign_keywords),
+                    str(default_config.ambiguity_policy),
+                    default_config.vllm_temperature,
+                    default_config.vllm_max_tokens,
                     default_config.updated_at,
                     default_config.updated_by,
                     default_config.version,
@@ -370,6 +420,13 @@ class AlloyDBManager:
             escalation_target=EscalationTarget.GEMINI,
             gemini_model=self.settings.gemini_model,
             gemma_model=self.settings.gemma_model_name,
+            gemma_service_url=self.settings.gemma_service_url or None,
+            gemma_timeout_seconds=self.settings.gemma_timeout_seconds,
+            alert_keywords=list(DEFAULT_ALERT_KEYWORDS),
+            benign_keywords=list(DEFAULT_BENIGN_KEYWORDS),
+            ambiguity_policy=AmbiguityPolicy.FAIL_SAFE,
+            vllm_temperature=0.0,
+            vllm_max_tokens=32,
         )
 
     async def get_workflow_config(self) -> WorkflowConfig:
@@ -381,12 +438,24 @@ class AlloyDBManager:
                         """
                         SELECT enable_tier1_gemma, gemma_triage_prompt, gemma_triage_threshold,
                                escalation_target, gemini_escalation_prompt, gemma_escalation_prompt,
-                               gemini_model, gemma_model, updated_at, updated_by, version
+                               gemini_model, gemma_model, gemma_service_url, gemma_timeout_seconds,
+                               alert_keywords, benign_keywords, ambiguity_policy,
+                               vllm_temperature, vllm_max_tokens,
+                               updated_at, updated_by, version
                         FROM workflow_settings
                         WHERE config_id = 'active'
                         """
                     )
                     if row:
+                        raw_alert = row["alert_keywords"]
+                        alert_kw = (
+                            json.loads(raw_alert) if isinstance(raw_alert, str) else raw_alert
+                        )
+                        raw_benign = row["benign_keywords"]
+                        benign_kw = (
+                            json.loads(raw_benign) if isinstance(raw_benign, str) else raw_benign
+                        )
+
                         return WorkflowConfig(
                             enable_tier1_gemma=row["enable_tier1_gemma"],
                             gemma_triage_prompt=row["gemma_triage_prompt"],
@@ -396,6 +465,23 @@ class AlloyDBManager:
                             gemma_escalation_prompt=row["gemma_escalation_prompt"],
                             gemini_model=row["gemini_model"],
                             gemma_model=row["gemma_model"],
+                            gemma_service_url=row["gemma_service_url"],
+                            gemma_timeout_seconds=row["gemma_timeout_seconds"] or 2.0,
+                            alert_keywords=alert_kw
+                            if alert_kw is not None
+                            else list(DEFAULT_ALERT_KEYWORDS),
+                            benign_keywords=benign_kw
+                            if benign_kw is not None
+                            else list(DEFAULT_BENIGN_KEYWORDS),
+                            ambiguity_policy=AmbiguityPolicy(
+                                row["ambiguity_policy"] or AmbiguityPolicy.FAIL_SAFE
+                            ),
+                            vllm_temperature=row["vllm_temperature"]
+                            if row["vllm_temperature"] is not None
+                            else 0.0,
+                            vllm_max_tokens=row["vllm_max_tokens"]
+                            if row["vllm_max_tokens"] is not None
+                            else 32,
                             updated_at=row["updated_at"],
                             updated_by=row["updated_by"],
                             version=row["version"],
@@ -422,9 +508,13 @@ class AlloyDBManager:
                                 config_id, enable_tier1_gemma, gemma_triage_prompt,
                                 gemma_triage_threshold, escalation_target,
                                 gemini_escalation_prompt, gemma_escalation_prompt,
-                                gemini_model, gemma_model, updated_at, updated_by, version
+                                gemini_model, gemma_model, gemma_service_url,
+                                gemma_timeout_seconds, alert_keywords, benign_keywords,
+                                ambiguity_policy, vllm_temperature, vllm_max_tokens,
+                                updated_at, updated_by, version
                             ) VALUES (
-                                'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                                'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                                $11, $12, $13, $14, $15, $16, $17, $18
                             )
                             ON CONFLICT (config_id) DO UPDATE SET
                                 enable_tier1_gemma = EXCLUDED.enable_tier1_gemma,
@@ -435,6 +525,13 @@ class AlloyDBManager:
                                 gemma_escalation_prompt = EXCLUDED.gemma_escalation_prompt,
                                 gemini_model = EXCLUDED.gemini_model,
                                 gemma_model = EXCLUDED.gemma_model,
+                                gemma_service_url = EXCLUDED.gemma_service_url,
+                                gemma_timeout_seconds = EXCLUDED.gemma_timeout_seconds,
+                                alert_keywords = EXCLUDED.alert_keywords,
+                                benign_keywords = EXCLUDED.benign_keywords,
+                                ambiguity_policy = EXCLUDED.ambiguity_policy,
+                                vllm_temperature = EXCLUDED.vllm_temperature,
+                                vllm_max_tokens = EXCLUDED.vllm_max_tokens,
                                 updated_at = EXCLUDED.updated_at,
                                 updated_by = EXCLUDED.updated_by,
                                 version = EXCLUDED.version
@@ -447,6 +544,13 @@ class AlloyDBManager:
                             config.gemma_escalation_prompt,
                             config.gemini_model,
                             config.gemma_model,
+                            config.gemma_service_url,
+                            config.gemma_timeout_seconds,
+                            json.dumps(config.alert_keywords),
+                            json.dumps(config.benign_keywords),
+                            str(config.ambiguity_policy),
+                            config.vllm_temperature,
+                            config.vllm_max_tokens,
                             config.updated_at,
                             config.updated_by,
                             config.version,
@@ -457,9 +561,13 @@ class AlloyDBManager:
                                 version, enable_tier1_gemma, gemma_triage_prompt,
                                 gemma_triage_threshold, escalation_target,
                                 gemini_escalation_prompt, gemma_escalation_prompt,
-                                gemini_model, gemma_model, changed_at, changed_by
+                                gemini_model, gemma_model, gemma_service_url,
+                                gemma_timeout_seconds, alert_keywords, benign_keywords,
+                                ambiguity_policy, vllm_temperature, vllm_max_tokens,
+                                changed_at, changed_by
                             ) VALUES (
-                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                                $11, $12, $13, $14, $15, $16, $17, $18
                             )
                             """,
                             config.version,
@@ -471,6 +579,13 @@ class AlloyDBManager:
                             config.gemma_escalation_prompt,
                             config.gemini_model,
                             config.gemma_model,
+                            config.gemma_service_url,
+                            config.gemma_timeout_seconds,
+                            json.dumps(config.alert_keywords),
+                            json.dumps(config.benign_keywords),
+                            str(config.ambiguity_policy),
+                            config.vllm_temperature,
+                            config.vllm_max_tokens,
                             config.updated_at,
                             config.updated_by,
                         )

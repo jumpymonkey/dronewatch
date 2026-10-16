@@ -65,8 +65,8 @@ class Settings(BaseSettings):
     )
     gemma_triage_prompt: str = Field(
         default=(
-            "detect campus security anomalies, unauthorized persons, or perimeter breaches; "
-            "answer safe or alert"
+            "detect campus security anomalies, unauthorized persons, perimeter breaches, "
+            "or vehicles and equipment on pedestrian walkways; answer safe or alert"
         ),
         description="Zero-shot prompt sent to Gemma 4 for front-line triage",
     )

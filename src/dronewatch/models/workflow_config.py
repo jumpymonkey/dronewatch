@@ -6,8 +6,46 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_GEMMA_TRIAGE_PROMPT: str = (
-    "detect campus security anomalies, unauthorized persons, or perimeter breaches; "
-    "answer safe or alert"
+    "detect campus security anomalies, unauthorized persons, perimeter breaches, "
+    "or vehicles and equipment on pedestrian walkways; answer safe or alert"
+)
+
+DEFAULT_ALERT_KEYWORDS: tuple[str, ...] = (
+    "alert",
+    "suspicious",
+    "anomalous",
+    "anomaly",
+    "intruder",
+    "unauthorized",
+    "trespass",
+    "trespassing",
+    "breach",
+    "danger",
+    "hazard",
+    "threat",
+    "weapon",
+    "climbing",
+    "fire",
+    "smoke",
+    "loitering",
+    "equipment",
+    "machinery",
+    "vehicle",
+    "cart",
+    "lift",
+    "crane",
+    "obstruction",
+    "blocked",
+)
+
+DEFAULT_BENIGN_KEYWORDS: tuple[str, ...] = (
+    "safe",
+    "normal",
+    "benign",
+    "clear",
+    "empty",
+    "routine",
+    "authorized",
 )
 
 DEFAULT_GEMINI_ESCALATION_PROMPT: str = """\
@@ -51,6 +89,13 @@ class EscalationTarget(StrEnum):
     GEMMA = "GEMMA"
 
 
+class AmbiguityPolicy(StrEnum):
+    """Handling policy when front-line triage output is ambiguous or unclassified."""
+
+    FAIL_SAFE = "FAIL_SAFE"
+    CONSERVATIVE = "CONSERVATIVE"
+
+
 class WorkflowConfig(BaseModel):
     """Complete active workflow configuration model."""
 
@@ -90,6 +135,40 @@ class WorkflowConfig(BaseModel):
         default="google/gemma-4-E2B-it",
         description="Gemma model identifier served by vLLM",
     )
+    gemma_service_url: str | None = Field(
+        default=None,
+        description="Override internal Cloud Run / vLLM service URL",
+    )
+    gemma_timeout_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=30.0,
+        description="HTTP timeout in seconds for Gemma triage/escalation calls",
+    )
+    alert_keywords: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALERT_KEYWORDS),
+        description="Keywords triggering alert score in Gemma triage",
+    )
+    benign_keywords: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_BENIGN_KEYWORDS),
+        description="Keywords indicating benign status in Gemma triage",
+    )
+    ambiguity_policy: AmbiguityPolicy = Field(
+        default=AmbiguityPolicy.FAIL_SAFE,
+        description="Handling policy when Gemma triage output is unclassified",
+    )
+    vllm_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for vLLM inference",
+    )
+    vllm_max_tokens: int = Field(
+        default=32,
+        ge=8,
+        le=512,
+        description="Max tokens generated for front-line triage",
+    )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp of last update in UTC",
@@ -103,6 +182,14 @@ class WorkflowConfig(BaseModel):
     @field_validator("escalation_target", mode="before")
     @classmethod
     def normalize_escalation_target(cls, v: object) -> object:
+        """Coerce string enum input to uppercase."""
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
+    @field_validator("ambiguity_policy", mode="before")
+    @classmethod
+    def normalize_ambiguity_policy(cls, v: object) -> object:
         """Coerce string enum input to uppercase."""
         if isinstance(v, str):
             return v.upper()
@@ -123,10 +210,28 @@ class WorkflowConfigUpdate(BaseModel):
     gemini_model: str | None = Field(
         default=None, min_length=1, description="Gemini model identifier"
     )
+    gemma_model: str | None = Field(
+        default=None, min_length=1, description="Gemma model identifier served by vLLM"
+    )
+    gemma_service_url: str | None = None
+    gemma_timeout_seconds: float | None = Field(default=None, ge=0.5, le=30.0)
+    alert_keywords: list[str] | None = None
+    benign_keywords: list[str] | None = None
+    ambiguity_policy: AmbiguityPolicy | None = None
+    vllm_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    vllm_max_tokens: int | None = Field(default=None, ge=8, le=512)
 
     @field_validator("escalation_target", mode="before")
     @classmethod
     def normalize_escalation_target(cls, v: object) -> object:
+        """Coerce string enum input to uppercase."""
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
+    @field_validator("ambiguity_policy", mode="before")
+    @classmethod
+    def normalize_ambiguity_policy(cls, v: object) -> object:
         """Coerce string enum input to uppercase."""
         if isinstance(v, str):
             return v.upper()

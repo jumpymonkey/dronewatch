@@ -149,19 +149,24 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 - **Frontend Error Resilience:** The React + Vite frontend (`StreamGrid`) features auto-retry logic with cache-busting on `<img className="video-player">` elements to seamlessly manage RTSP connection handshakes.
 
 ### 4. Dynamic Workflow Administration & Multimodal Model Agility
-- **In-App Administration Tab:** Dedicated admin console in the React dashboard to adjust vision pipelines in real time without service redeployment or stream interruptions.
+- **In-App Administration Tab:** Dedicated admin console in the React dashboard to adjust vision pipelines, inference thresholds, and model parameters in real time without service redeployment or stream interruptions.
 - **Tier 1 Gemma Triage Controls:**
   - Toggle Tier 1 triage gate on/off. When disabled, all motion-triggered frames route directly to Tier 2.
   - Customize the zero-shot Gemma triage prompt.
   - Adjust escalation confidence threshold ($0.00$ to $1.00$).
+- **Gemma 4 & vLLM Runtime Parameters:**
+  - **Endpoint & Model Selection:** Runtime override of the vLLM service URL and model identifier (`google/gemma-4-E2B-it`, `google/gemma-4-4B-it`, `google/gemma-4-27B-it`, or custom HuggingFace/vLLM endpoints).
+  - **Inference Sampling:** Configurable sampling temperature ($0.0$ to $2.0$), generation token budget ($8$ to $512$ tokens), and request timeout ($0.5\text{s}$ to $30.0\text{s}$).
+  - **Ambiguity Policy:** Selectable resolution policy (`FAIL_SAFE` vs `CONSERVATIVE`) determining triage behavior when Gemma generates ambiguous or unclassified responses (defaulting to safe escalation at $0.80$ confidence under `FAIL_SAFE`).
+  - **Dynamic Keyword Taxonomy:** In-browser tag chip editor to add/remove alert triggers (`alert`, `hazard`, `equipment`, `machinery`, `obstruction`) and benign indicators (`safe`, `normal`, `clear`), persisted directly as JSON in AlloyDB.
 - **Tier 2 Escalation Engine:**
   - Choose between **Gemini** (default) or **Gemma** for Tier 2 deep analysis.
   - Dedicated prompt editors for Gemini and Gemma escalations with automated schema guidance.
 - **Dynamic Gemini Escalation Models:**
   - Dynamic model dropdown supporting `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-4-aragon`, and custom model identifiers.
-- **AlloyDB Persistence:** Single-row `workflow_config` table persists settings across container restarts with automatic schema migration and fallback.
+- **AlloyDB Persistence & Versioning:** Singleton configuration table (`workflow_settings`) with full audit history tracking (`workflow_settings_history`), revision counters, and automatic backward-compatible schema migrations.
 - **Live Stream HUD Attribution:** Drone video overlays display active model badges, analysis source tier (`triage` vs `escalation`), and round-trip inference latencies in milliseconds.
-- **Complete Response Auditing:** Structured logging captures exact raw responses, summaries, and classifications from both triage and escalation tiers.
+- **Complete Response Auditing:** Structured logging and in-memory telemetry capture exact raw responses, summaries, and classifications from both triage and escalation tiers.
 
 ---
 

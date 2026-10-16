@@ -26,6 +26,164 @@ const GEMINI_MODELS = [
   { id: 'gemini-4-aragon', label: 'gemini-4-aragon (Advanced Multimodal Agent)' },
 ];
 
+const GEMMA_MODELS = [
+  { id: 'google/gemma-4-E2B-it', label: 'google/gemma-4-E2B-it (Default Cloud Run Gemma 4)' },
+  { id: 'google/gemma-3-4b-it', label: 'google/gemma-3-4b-it (Gemma 3 4B Vision / Instruct)' },
+  { id: 'google/gemma-4-4b-it', label: 'google/gemma-4-4b-it (Gemma 4 4B Multimodal)' },
+  { id: 'google/gemma-4-9b-it', label: 'google/gemma-4-9b-it (Gemma 4 9B High Capacity)' },
+  { id: 'google/gemma-2-2b-it', label: 'google/gemma-2-2b-it (Lightweight 2B Edge)' },
+];
+
+const DEFAULT_ALERT_KEYWORDS = [
+  'alert',
+  'suspicious',
+  'anomalous',
+  'anomaly',
+  'intruder',
+  'unauthorized',
+  'trespass',
+  'trespassing',
+  'breach',
+  'danger',
+  'hazard',
+  'threat',
+  'weapon',
+  'climbing',
+  'fire',
+  'smoke',
+  'loitering',
+  'equipment',
+  'machinery',
+  'vehicle',
+  'cart',
+  'lift',
+  'crane',
+  'obstruction',
+  'blocked',
+];
+
+const DEFAULT_BENIGN_KEYWORDS = [
+  'safe',
+  'normal',
+  'benign',
+  'clear',
+  'empty',
+  'routine',
+  'authorized',
+];
+
+const arraysEqual = (a, b) => {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  return a.every((val, idx) => val === b[idx]);
+};
+
+function KeywordTagEditor({
+  title,
+  subtitle,
+  tags = [],
+  onChange,
+  onResetDefaults,
+  chipType = 'alert',
+  placeholder = 'Add keyword...',
+}) {
+  const [inputValue, setInputValue] = useState('');
+
+  const handleAdd = () => {
+    const trimmed = inputValue.trim().toLowerCase();
+    if (!trimmed) return;
+    if (!tags.includes(trimmed)) {
+      onChange([...tags, trimmed]);
+    }
+    setInputValue('');
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      handleAdd();
+    }
+  };
+
+  const handleRemove = (tagToRemove) => {
+    onChange(tags.filter((t) => t !== tagToRemove));
+  };
+
+  return (
+    <div className="keyword-editor-container">
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: '0.5rem',
+        }}
+      >
+        <div>
+          <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+            {title}
+          </span>
+          {subtitle && (
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0.15rem 0 0 0' }}>
+              {subtitle}
+            </p>
+          )}
+        </div>
+        {onResetDefaults && (
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+            onClick={onResetDefaults}
+          >
+            Reset Defaults
+          </button>
+        )}
+      </div>
+
+      <div className="keyword-chips-wrap">
+        {tags.map((tag) => (
+          <span
+            key={tag}
+            className={`keyword-chip ${chipType === 'alert' ? 'alert-chip' : 'benign-chip'}`}
+          >
+            <span>{tag}</span>
+            <button
+              type="button"
+              className="keyword-chip-remove"
+              onClick={() => handleRemove(tag)}
+              title={`Remove "${tag}"`}
+            >
+              <X size={12} />
+            </button>
+          </span>
+        ))}
+      </div>
+
+      <div className="keyword-input-row">
+        <input
+          type="text"
+          className="keyword-input-field"
+          placeholder={placeholder}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem' }}
+          onClick={handleAdd}
+          disabled={!inputValue.trim()}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminView() {
   const [config, setConfig] = useState(null);
   const [initialConfig, setInitialConfig] = useState(null);
@@ -40,6 +198,17 @@ export default function AdminView() {
   const [selectedResponse, setSelectedResponse] = useState(null);
   const [copiedResponse, setCopiedResponse] = useState(false);
 
+  const normalizeConfig = (data) => ({
+    ...data,
+    alert_keywords: data.alert_keywords || [...DEFAULT_ALERT_KEYWORDS],
+    benign_keywords: data.benign_keywords || [...DEFAULT_BENIGN_KEYWORDS],
+    ambiguity_policy: data.ambiguity_policy || 'FAIL_SAFE',
+    gemma_model: data.gemma_model || 'google/gemma-4-E2B-it',
+    gemma_timeout_seconds: data.gemma_timeout_seconds ?? 2.0,
+    vllm_temperature: data.vllm_temperature ?? 0.0,
+    vllm_max_tokens: data.vllm_max_tokens ?? 32,
+  });
+
   const fetchConfig = async () => {
     setLoading(true);
     setErrorMessage(null);
@@ -49,8 +218,9 @@ export default function AdminView() {
         throw new Error(`Failed to load configuration (HTTP ${res.status})`);
       }
       const data = await res.json();
-      setConfig(data);
-      setInitialConfig(data);
+      const normalized = normalizeConfig(data);
+      setConfig(normalized);
+      setInitialConfig(normalized);
     } catch (err) {
       console.error('Error loading workflow configuration:', err);
       setErrorMessage(err.message || 'Unable to load configuration from backend.');
@@ -88,7 +258,15 @@ export default function AdminView() {
       config.escalation_target !== initialConfig.escalation_target ||
       config.gemini_escalation_prompt !== initialConfig.gemini_escalation_prompt ||
       config.gemma_escalation_prompt !== initialConfig.gemma_escalation_prompt ||
-      config.gemini_model !== initialConfig.gemini_model);
+      config.gemini_model !== initialConfig.gemini_model ||
+      config.gemma_model !== initialConfig.gemma_model ||
+      (config.gemma_service_url || '') !== (initialConfig.gemma_service_url || '') ||
+      config.gemma_timeout_seconds !== initialConfig.gemma_timeout_seconds ||
+      config.ambiguity_policy !== initialConfig.ambiguity_policy ||
+      config.vllm_temperature !== initialConfig.vllm_temperature ||
+      config.vllm_max_tokens !== initialConfig.vllm_max_tokens ||
+      !arraysEqual(config.alert_keywords, initialConfig.alert_keywords) ||
+      !arraysEqual(config.benign_keywords, initialConfig.benign_keywords));
 
   const handleSave = async (e) => {
     if (e) e.preventDefault();
@@ -106,6 +284,14 @@ export default function AdminView() {
       gemini_escalation_prompt: config.gemini_escalation_prompt,
       gemma_escalation_prompt: config.gemma_escalation_prompt,
       gemini_model: config.gemini_model,
+      gemma_model: config.gemma_model,
+      gemma_service_url: config.gemma_service_url?.trim() || null,
+      gemma_timeout_seconds: parseFloat(config.gemma_timeout_seconds),
+      alert_keywords: config.alert_keywords || [],
+      benign_keywords: config.benign_keywords || [],
+      ambiguity_policy: config.ambiguity_policy || 'FAIL_SAFE',
+      vllm_temperature: parseFloat(config.vllm_temperature),
+      vllm_max_tokens: parseInt(config.vllm_max_tokens, 10),
     };
 
     try {
@@ -121,8 +307,9 @@ export default function AdminView() {
       }
 
       const updated = await res.json();
-      setConfig(updated);
-      setInitialConfig(updated);
+      const normalized = normalizeConfig(updated);
+      setConfig(normalized);
+      setInitialConfig(normalized);
       setStatusMessage('Workflow configuration saved and hot-reloaded across all active streams.');
       setTimeout(() => setStatusMessage(null), 5000);
     } catch (err) {
@@ -157,8 +344,9 @@ export default function AdminView() {
       }
 
       const defaultCfg = await res.json();
-      setConfig(defaultCfg);
-      setInitialConfig(defaultCfg);
+      const normalized = normalizeConfig(defaultCfg);
+      setConfig(normalized);
+      setInitialConfig(normalized);
       setStatusMessage('Workflow configuration successfully reset to factory defaults.');
       setTimeout(() => setStatusMessage(null), 5000);
     } catch (err) {
@@ -342,6 +530,255 @@ export default function AdminView() {
                   : 'Balanced Default'}
               </span>
             </div>
+          </div>
+        </div>
+
+        {/* Gemma 4 & vLLM Runtime Parameters Section */}
+        <div className="admin-section glass-panel">
+          <div className="section-header">
+            <div className="section-title-group">
+              <div className="section-badge gemma-badge">
+                <Cpu size={16} />
+                <span>Runtime Engine</span>
+              </div>
+              <h3>Gemma 4 & vLLM Runtime Parameters</h3>
+            </div>
+          </div>
+
+          <p className="section-description">
+            Fine-tune vLLM inference parameters, model identifiers, service endpoints, triage ambiguity
+            handling, and keyword taxonomy. Changes hot-reload across all streams without restart.
+          </p>
+
+          {/* Grid 2-col: Service URL & Model Selection */}
+          <div className="admin-grid-2col">
+            <div className="form-group">
+              <div className="label-with-hint">
+                <label htmlFor="gemma-service-url">vLLM Service Endpoint URL</label>
+                <span className="hint-text">Leave blank to use internal Cloud Run default</span>
+              </div>
+              <input
+                id="gemma-service-url"
+                type="text"
+                className="admin-input mono-font"
+                placeholder="http://gemma-vllm.internal:8000 (default)"
+                value={config?.gemma_service_url || ''}
+                onChange={(e) =>
+                  setConfig((prev) => ({ ...prev, gemma_service_url: e.target.value }))
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <div className="label-with-hint">
+                <label htmlFor="gemma-model-select">Gemma Model Identifier</label>
+                <span className="hint-text">Model served by the vLLM instance</span>
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                <select
+                  id="gemma-model-select"
+                  className="admin-select"
+                  value={
+                    GEMMA_MODELS.some((m) => m.id === config?.gemma_model)
+                      ? config?.gemma_model
+                      : 'custom'
+                  }
+                  onChange={(e) => {
+                    if (e.target.value !== 'custom') {
+                      setConfig((prev) => ({ ...prev, gemma_model: e.target.value }));
+                    }
+                  }}
+                >
+                  {GEMMA_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                  <option value="custom">Custom Model Identifier...</option>
+                </select>
+                {!GEMMA_MODELS.some((m) => m.id === config?.gemma_model) && (
+                  <input
+                    type="text"
+                    placeholder="e.g. google/gemma-4-E2B-it"
+                    className="admin-input mono-font"
+                    value={config?.gemma_model || ''}
+                    onChange={(e) =>
+                      setConfig((prev) => ({ ...prev, gemma_model: e.target.value }))
+                    }
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Grid 3-col: Timeout, Temperature, Max Tokens */}
+          <div className="admin-grid-3col">
+            <div className="form-group">
+              <div className="label-with-hint">
+                <label htmlFor="gemma-timeout">
+                  Timeout ({(config?.gemma_timeout_seconds ?? 2.0).toFixed(1)}s)
+                </label>
+                <span className="hint-text">Per-request HTTP timeout (0.5s - 30.0s)</span>
+              </div>
+              <input
+                id="gemma-timeout"
+                type="number"
+                step="0.5"
+                min="0.5"
+                max="30.0"
+                className="admin-input mono-font"
+                value={config?.gemma_timeout_seconds ?? 2.0}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    gemma_timeout_seconds: parseFloat(e.target.value) || 2.0,
+                  }))
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <div className="label-with-hint">
+                <label htmlFor="vllm-temperature">
+                  Temperature ({(config?.vllm_temperature ?? 0.0).toFixed(2)})
+                </label>
+                <span className="hint-text">Sampling randomness (0.0 = deterministic)</span>
+              </div>
+              <input
+                id="vllm-temperature"
+                type="range"
+                min="0.0"
+                max="2.0"
+                step="0.05"
+                className="threshold-slider"
+                value={config?.vllm_temperature ?? 0.0}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    vllm_temperature: parseFloat(e.target.value),
+                  }))
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <div className="label-with-hint">
+                <label htmlFor="vllm-max-tokens">
+                  Max Tokens ({config?.vllm_max_tokens ?? 32})
+                </label>
+                <span className="hint-text">Max generation tokens for triage</span>
+              </div>
+              <input
+                id="vllm-max-tokens"
+                type="range"
+                min="8"
+                max="512"
+                step="8"
+                className="threshold-slider"
+                value={config?.vllm_max_tokens ?? 32}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    vllm_max_tokens: parseInt(e.target.value, 10) || 32,
+                  }))
+                }
+              />
+            </div>
+          </div>
+
+          {/* Ambiguity Policy Cards */}
+          <div className="form-group" style={{ marginTop: '1.25rem' }}>
+            <div className="label-with-hint">
+              <label>Triage Ambiguity & Unclassified Handling Policy</label>
+              <span className="hint-text">
+                Determines action when Gemma 4 response contains neither explicit alert nor benign verdict
+              </span>
+            </div>
+            <div className="policy-cards">
+              <div
+                className={`policy-card ${
+                  (config?.ambiguity_policy || 'FAIL_SAFE') === 'FAIL_SAFE'
+                    ? 'selected-fail-safe'
+                    : ''
+                }`}
+                onClick={() =>
+                  setConfig((prev) => ({ ...prev, ambiguity_policy: 'FAIL_SAFE' }))
+                }
+              >
+                <div className="policy-card-header">
+                  <span className="policy-title">FAIL_SAFE (Recommended)</span>
+                  <div className="target-radio-indicator">
+                    <div
+                      className="radio-inner"
+                      style={{
+                        opacity:
+                          (config?.ambiguity_policy || 'FAIL_SAFE') === 'FAIL_SAFE' ? 1 : 0,
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="policy-desc">
+                  Treat ambiguous or verbose output as suspicious (score 0.80). Automatically escalates
+                  the frame to Tier 2 Gemini for verification, preventing missed hazards.
+                </p>
+              </div>
+
+              <div
+                className={`policy-card ${
+                  config?.ambiguity_policy === 'CONSERVATIVE' ? 'selected-conservative' : ''
+                }`}
+                onClick={() =>
+                  setConfig((prev) => ({ ...prev, ambiguity_policy: 'CONSERVATIVE' }))
+                }
+              >
+                <div className="policy-card-header">
+                  <span className="policy-title">CONSERVATIVE (Cost Saver)</span>
+                  <div className="target-radio-indicator">
+                    <div
+                      className="radio-inner"
+                      style={{
+                        opacity: config?.ambiguity_policy === 'CONSERVATIVE' ? 1 : 0,
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="policy-desc">
+                  Treat unclassified output as benign (score 0.20) unless explicit alert keywords appear.
+                  Reduces Gemini API calls in high-traffic or benign environments.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Dynamic Keyword Tag Editors */}
+          <div className="admin-grid-2col" style={{ marginTop: '1.25rem' }}>
+            <KeywordTagEditor
+              title="Alert Trigger Keywords"
+              subtitle="Tokens indicating suspicious activity, equipment, hazards, or security threats"
+              tags={config?.alert_keywords || []}
+              chipType="alert"
+              placeholder="e.g. equipment, forklift, hazard..."
+              onChange={(newTags) =>
+                setConfig((prev) => ({ ...prev, alert_keywords: newTags }))
+              }
+              onResetDefaults={() =>
+                setConfig((prev) => ({ ...prev, alert_keywords: [...DEFAULT_ALERT_KEYWORDS] }))
+              }
+            />
+
+            <KeywordTagEditor
+              title="Benign Classification Keywords"
+              subtitle="Tokens indicating normal, safe, nominal, or routine campus conditions"
+              tags={config?.benign_keywords || []}
+              chipType="benign"
+              placeholder="e.g. routine, nominal, normal..."
+              onChange={(newTags) =>
+                setConfig((prev) => ({ ...prev, benign_keywords: newTags }))
+              }
+              onResetDefaults={() =>
+                setConfig((prev) => ({ ...prev, benign_keywords: [...DEFAULT_BENIGN_KEYWORDS] }))
+              }
+            />
           </div>
         </div>
 

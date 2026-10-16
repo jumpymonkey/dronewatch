@@ -436,10 +436,10 @@ Operational campus environments require dynamic tuning of vision thresholds, tri
 ```
 
 ### 11.2 AlloyDB Schema Specification
-Configuration settings are persisted in AlloyDB within a dedicated single-row configuration table:
+Configuration settings are persisted in AlloyDB within dedicated configuration and audit tables:
 
 ```sql
-CREATE TABLE IF NOT EXISTS workflow_config (
+CREATE TABLE IF NOT EXISTS workflow_settings (
     id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     enable_tier1_gemma BOOLEAN NOT NULL DEFAULT TRUE,
     escalation_target VARCHAR(32) NOT NULL DEFAULT 'GEMINI',
@@ -448,7 +448,24 @@ CREATE TABLE IF NOT EXISTS workflow_config (
     gemini_escalation_prompt TEXT NOT NULL,
     gemma_escalation_prompt TEXT NOT NULL,
     gemini_model VARCHAR(64) NOT NULL DEFAULT 'gemini-3.6-flash',
+    gemma_model VARCHAR(64) NOT NULL DEFAULT 'google/gemma-4-E2B-it',
+    gemma_service_url VARCHAR(256),
+    gemma_timeout_seconds DOUBLE PRECISION NOT NULL DEFAULT 2.0,
+    alert_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+    benign_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ambiguity_policy VARCHAR(32) NOT NULL DEFAULT 'FAIL_SAFE',
+    vllm_temperature DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    vllm_max_tokens INT NOT NULL DEFAULT 32,
+    version INT NOT NULL DEFAULT 1,
+    updated_by VARCHAR(64) NOT NULL DEFAULT 'pilot-admin',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS workflow_settings_history (
+    id SERIAL PRIMARY KEY,
+    version INT NOT NULL,
+    settings JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -460,7 +477,8 @@ CREATE TABLE IF NOT EXISTS workflow_config (
 | `escalation_target=GEMINI`, `gemini_model=gemini-3.7-flash` | Vertex AI Gemini | `gemini-3.7-flash` | `gemini_escalation_prompt` | Falls back to default model list or logs structured alert |
 | `escalation_target=GEMINI`, `gemini_model=gemini-3.6-flash` | Vertex AI Gemini | `gemini-3.6-flash` | `gemini_escalation_prompt` | Default production model |
 | `escalation_target=GEMINI`, `gemini_model=gemini-4-aragon` | Vertex AI Gemini | `gemini-4-aragon` | `gemini_escalation_prompt` | Next-generation multimodal model |
-| `escalation_target=GEMMA` | Cloud Run GPU | `google/gemma-4-E2B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
+| `escalation_target=GEMMA`, `gemma_model=google/gemma-4-E2B-it` | Cloud Run GPU | `google/gemma-4-E2B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
+| `escalation_target=GEMMA`, `gemma_model=google/gemma-4-4B-it` | Cloud Run GPU | `google/gemma-4-4B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
 
 ### 11.4 Gemma as Tier 2 Deep Inspection Model
 When configured for Gemma escalation (`escalation_target=GEMMA`), `GemmaTriageClient.deep_analyze_frame()` directs the model to output a strictly compliant JSON schema matching Pydantic `AnalysisResult`:
@@ -479,9 +497,21 @@ When configured for Gemma escalation (`escalation_target=GEMMA`), `GemmaTriageCl
 }
 ```
 
-Threat alerts are gated on `confidence_score >= gemma_triage_threshold`, preventing low-confidence hallucinations from triggering critical sirens or pilot alerts.
+Threat alerts are gated on `confidence_score >= gemma_triage_threshold`, preventing low-confidence hallucinations from triggering critical sirens or pilot alerts. Furthermore, unstructured or semi-structured model completions containing hazards (e.g. equipment on pedestrian paths) are robustly parsed via keyword-aware categorization, preventing false `CLEAR` verdicts.
 
-### 11.5 Observability & Telemetry Audit Contract
+### 11.5 Gemma 4 Triage Engine & Ambiguity Policy Resolution
+To resolve borderline frames and prevent false negatives (such as equipment obstructions on pedestrian walkways), the Tier 1 triage engine supports fine-grained operational policies:
+
+1. **Ambiguity Resolution Policy (`AmbiguityPolicy`):**
+   - **`FAIL_SAFE` (Default):** When a model response contains conflicting tokens or fails to match explicit alert or benign keywords, the engine treats the situation as a potential hazard. It assigns an escalation score of $0.80$ and forwards the frame to Tier 2 frontier analysis.
+   - **`CONSERVATIVE`:** Suppresses borderline classifications ($0.20$ score) to minimize frontier model calls when operational budget takes precedence over edge-case detection.
+2. **Dynamic Keyword Taxonomy:**
+   - Instead of static, hardcoded regular expressions, the engine evaluates against user-defined alert keywords (`equipment`, `machinery`, `hazard`, `obstruction`, etc.) and benign keywords (`safe`, `normal`, `clear`).
+   - Keyword arrays are persisted in AlloyDB as `JSONB` and editable directly in the UI via tag chips.
+3. **vLLM Sampling Controls:**
+   - Operators can tune temperature (defaulting to deterministic greedy decoding `0.0`) and token limits (`32` for binary triage, up to `512` for detailed escalation) directly from the administration dashboard.
+
+### 11.6 Observability & Telemetry Audit Contract
 Every evaluated frame and security incident publishes full attribution metadata across WebSockets and Cloud Logging:
 
 - `source_tier`: Analysis tier producing the verdict (`"triage"` or `"escalation"`).
@@ -490,4 +520,5 @@ Every evaluated frame and security incident publishes full attribution metadata 
 - `scene_summary`: Concise summary displayed on HUD.
 - `raw_response`: Unmodified response text or JSON string for compliance audits.
 - `latency_ms`: Complete inference and network transit latency in milliseconds.
+
 

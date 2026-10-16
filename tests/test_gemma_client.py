@@ -33,7 +33,7 @@ def gemma_settings() -> Settings:
         ("alert: intruder spotted near building 4", True, 0.8, 1.0, "alert"),
         ("unauthorized vehicle parked on walkway", True, 0.8, 1.0, "unauthorized"),
         ("breach of north perimeter fence detected", True, 0.9, 1.0, "breach"),
-        ("unknown blurry motion", False, 0.15, 0.25, "unclassified"),
+        ("unknown blurry motion", True, 0.75, 0.85, "ambiguous_fail_safe"),
     ],
 )
 def test_parse_triage_text_classifications(
@@ -44,13 +44,48 @@ def test_parse_triage_text_classifications(
     max_score: float,
     expected_tag: str,
 ) -> None:
-    """Test text parsing logic for zero-shot Gemma 4 responses."""
+    """Test text parsing logic for zero-shot Gemma 4 responses under default FAIL_SAFE policy."""
     client = GemmaTriageClient(gemma_settings)
     is_alert, score, tags = client._parse_triage_text(raw_text)
 
     assert is_alert == expected_alert
     assert min_score <= score <= max_score
     assert any(expected_tag in t for t in tags)
+
+
+def test_parse_triage_text_conservative_policy(gemma_settings: Settings) -> None:
+    """Verify CONSERVATIVE ambiguity policy suppresses unclassified frames below threshold."""
+    from dronewatch.models.workflow_config import AmbiguityPolicy
+
+    client = GemmaTriageClient(gemma_settings)
+    is_alert, score, tags = client._parse_triage_text(
+        "unknown blurry motion",
+        ambiguity_policy=AmbiguityPolicy.CONSERVATIVE,
+    )
+
+    assert is_alert is False
+    assert 0.15 <= score <= 0.25
+    assert "ambiguous_conservative" in tags
+
+
+def test_parse_deep_analysis_equipment_on_walkway_hazard(gemma_settings: Settings) -> None:
+    """Verify deep analysis recognizes equipment on pedestrian paths as HAZARD.
+
+    Ensures phrases like 'clear view of walkway with equipment' avoid CLEAR suppression.
+    """
+    client = GemmaTriageClient(gemma_settings)
+    raw_output = (
+        "Camera reveals a clear view of the north walkway, where construction equipment "
+        "and a lift cart are parked directly blocking the pedestrian pathway."
+    )
+
+    result = client._parse_deep_analysis_text(raw_output)
+
+    assert result.threat_level == ThreatLevel.MEDIUM
+    assert result.category == IncidentCategory.HAZARD
+    assert result.suspicious_activity_detected is True
+    assert result.confidence_score >= 0.75
+    assert "walkway" in result.summary.lower() or "equipment" in result.summary.lower()
 
 
 @pytest.mark.asyncio

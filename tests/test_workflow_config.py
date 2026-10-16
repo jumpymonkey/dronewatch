@@ -265,7 +265,7 @@ async def test_stream_processor_routes_to_gemma_tier2(
     frame_bytes = b"fake-jpeg-bytes"
     await processor._analyze_frame(frame_bytes)
 
-    # Assert Tier 1 received custom prompt and threshold
+    # Assert Tier 1 received custom prompt and threshold along with dynamic config parameters
     mock_gemma.triage_frame.assert_awaited_once_with(
         frame_bytes=frame_bytes,
         drone_id="Drone-Config-Routing-Test",
@@ -273,13 +273,26 @@ async def test_stream_processor_routes_to_gemma_tier2(
         request_scene_description=False,
         prompt="Triage this alert carefully",
         threshold=0.5,
+        gemma_service_url=custom_config.gemma_service_url,
+        gemma_model=custom_config.gemma_model,
+        gemma_timeout_seconds=custom_config.gemma_timeout_seconds,
+        alert_keywords=custom_config.alert_keywords,
+        benign_keywords=custom_config.benign_keywords,
+        ambiguity_policy=custom_config.ambiguity_policy,
+        vllm_temperature=custom_config.vllm_temperature,
+        vllm_max_tokens=custom_config.vllm_max_tokens,
     )
 
-    # Assert Tier 2 Gemma was called with custom prompt
+    # Assert Tier 2 Gemma was called with custom prompt and dynamic parameters
     mock_gemma.deep_analyze_frame.assert_awaited_once_with(
         frame_bytes=frame_bytes,
         escalation_prompt="Perform deep inspection with Gemma",
         drone_id="Drone-Config-Routing-Test",
+        gemma_service_url=custom_config.gemma_service_url,
+        gemma_model=custom_config.gemma_model,
+        gemma_timeout_seconds=custom_config.gemma_timeout_seconds,
+        vllm_temperature=custom_config.vllm_temperature,
+        vllm_max_tokens=custom_config.vllm_max_tokens,
     )
 
     # Gemini was NOT called
