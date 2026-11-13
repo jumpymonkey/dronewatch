@@ -97,6 +97,8 @@ async def broadcast_incident(event: IncidentEvent) -> None:
             "raw_response": event.raw_response,
             "latency_ms": event.latency_ms,
             "video_timestamp_formatted": event.video_timestamp_formatted,
+            "routing_action": event.routing_action,
+            "dispatch_action": event.dispatch_action,
         }
     )
 
@@ -137,8 +139,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="1.0.0",
-    description="Multi-Drone Video Analysis & Alerting System using Gemini 3.6 Flash and AlloyDB",
+    version="3.0.0",
+    description=(
+        "Multi-Drone Surveillance System with System 1 Decision Framework & Gemini/Gemma Escalation"
+    ),
     lifespan=lifespan,
 )
 
@@ -160,6 +164,7 @@ async def health_check() -> dict[str, Any]:
         "environment": settings.environment,
         "gemini_model": settings.gemini_model,
         "tier1_gemma_enabled": settings.enable_tier1_gemma,
+        "triage_mode": settings.triage_mode,
         "gemma_model": settings.gemma_model_name if settings.enable_tier1_gemma else None,
         "active_streams_count": len(active_streams),
     }

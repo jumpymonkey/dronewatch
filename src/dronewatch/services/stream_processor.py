@@ -20,8 +20,10 @@ from dronewatch.models.events import (
     StreamStatus,
     ThreatLevel,
 )
-from dronewatch.models.workflow_config import EscalationTarget, WorkflowConfig
+from dronewatch.models.triage import DispatchAction, RoutingAction
+from dronewatch.models.workflow_config import EscalationTarget, TriageMode, WorkflowConfig
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
+from dronewatch.services.decision_engine import DecisionEngine
 from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.motion_filter import MotionFilter
 
@@ -200,6 +202,7 @@ class DroneStreamProcessor:
         gemma_client: GemmaTriageClient | None = None,
         event_callback: EventCallback | None = None,
         config_provider: ConfigProvider | None = None,
+        decision_engine: DecisionEngine | None = None,
     ) -> None:
         """Initialize stream processor.
 
@@ -210,6 +213,7 @@ class DroneStreamProcessor:
             gemma_client: Optional Tier 1 Gemma 4 triage client.
             event_callback: Async callback invoked when an incident event is logged.
             config_provider: Optional callable returning dynamic WorkflowConfig.
+            decision_engine: Optional deterministic System 1 DecisionEngine instance.
         """
         self.config: DroneStreamConfig = config
         if self.config.stream_url:
@@ -220,6 +224,7 @@ class DroneStreamProcessor:
         self.analyzer: GeminiVideoAnalyzer = analyzer
         self.event_callback: EventCallback | None = event_callback
         self.config_provider: ConfigProvider | None = config_provider
+        self.decision_engine: DecisionEngine = decision_engine or DecisionEngine()
         self.motion_filter: MotionFilter = MotionFilter(
             sensitivity_threshold=settings.motion_sensitivity_threshold,
             min_motion_area=settings.min_motion_area,
@@ -251,8 +256,13 @@ class DroneStreamProcessor:
 
         return WorkflowConfig(
             enable_tier1_gemma=self.settings.enable_tier1_gemma,
+            triage_mode=TriageMode(self.settings.triage_mode),
             gemma_triage_prompt=self.settings.gemma_triage_prompt,
+            suppress_threshold=self.settings.suppress_threshold,
             gemma_triage_threshold=self.settings.gemma_triage_threshold,
+            corroboration_hits=self.settings.corroboration_hits,
+            corroboration_window=self.settings.corroboration_window,
+            escalation_cooldown_seconds=self.settings.escalation_cooldown_seconds,
             escalation_target=EscalationTarget.GEMINI,
             gemini_model=self.settings.gemini_model,
             gemma_model=self.settings.gemma_model_name,
@@ -283,6 +293,7 @@ class DroneStreamProcessor:
                 await asyncio.wait_for(asyncio.shield(self._task), timeout=0.5)
             except (TimeoutError, asyncio.CancelledError):
                 pass
+        self.decision_engine.reset_stream(self.config.drone_id)
         if self._owns_gemma_client and self.gemma_client is not None:
             await self.gemma_client.aclose()
         logger.info("Stopped stream processor for drone %s", self.config.drone_id)
@@ -293,16 +304,18 @@ class DroneStreamProcessor:
         video_timestamp_sec: float | None = None,
         is_heartbeat: bool = False,
     ) -> None:
-        """Execute two-tier analysis on a single frame based on dynamic WorkflowConfig.
+        """Execute System 1 Decision Framework & Tier 2 analysis on a single frame.
 
-        Tier 1 (Gemma 4): Fast front-line vision triage & routine scene heartbeat.
-        Tier 2 (Gemini Flash or Gemma 4): Escalated multimodal threat assessment.
+        Tier 1 (Gemma 4): Fast System 1 judgment + deterministic 3-band DecisionEngine.
+        Tier 2 (Gemini Flash or Gemma 4): Escalated multimodal threat assessment gated
+        by single-flight anti-snowball locks and decoupled dispatch policy.
         """
         try:
             formatted_timecode = format_video_timestamp(video_timestamp_sec)
             workflow_config = await self._get_active_workflow_config()
+            routing_action_str: str | None = None
 
-            # Tier 1: Front-line vision triage via Gemma 4 (Cloud Run GPU)
+            # Tier 1: Front-line System 1 judgment via Gemma 4 (Cloud Run GPU)
             if self.gemma_client and workflow_config.enable_tier1_gemma:
                 triage = await self.gemma_client.triage_frame(
                     frame_bytes=frame_bytes_data,
@@ -319,9 +332,19 @@ class DroneStreamProcessor:
                     ambiguity_policy=workflow_config.ambiguity_policy,
                     vllm_temperature=workflow_config.vllm_temperature,
                     vllm_max_tokens=workflow_config.vllm_max_tokens,
+                    triage_mode=workflow_config.triage_mode,
                 )
-                if not triage.escalate_to_gemini:
-                    if is_heartbeat:
+
+                routing = self.decision_engine.evaluate_tier1(
+                    drone_id=self.config.drone_id,
+                    triage=triage,
+                    config=workflow_config,
+                    video_timestamp_sec=video_timestamp_sec,
+                )
+                routing_action_str = str(routing.action)
+
+                if not routing.should_escalate:
+                    if is_heartbeat and routing.action == RoutingAction.SUPPRESS:
                         scene_desc = (
                             triage.scene_description
                             or triage.raw_output
@@ -352,71 +375,83 @@ class DroneStreamProcessor:
                             scene_summary=scene_desc,
                             raw_response=triage.raw_output,
                             latency_ms=triage.tier1_latency_ms,
+                            routing_action=routing_action_str,
+                            dispatch_action=str(DispatchAction.CLEAR_ROUTINE),
                         )
                         if self.event_callback:
                             await self.event_callback(event)
                         return
 
                     logger.info(
-                        "Tier 1 Gemma suppressed benign frame for %s [TC %s]: %s "
-                        "(score=%.2f, latency=%.1fms, tags=%s)",
+                        "DecisionEngine [%s] held/suppressed frame for %s [TC %s]: "
+                        "reason=%s p_threat=%.3f hits=%d/%d (latency=%.1fms)",
+                        routing.action,
                         self.config.drone_id,
                         formatted_timecode or "N/A",
-                        triage.raw_output.strip() if triage.raw_output else "SAFE",
+                        routing.reason,
                         triage.triage_score,
+                        routing.window_hits,
+                        routing.window_size,
                         triage.tier1_latency_ms,
-                        triage.tags,
                     )
                     return
 
                 logger.info(
-                    "Tier 1 Gemma escalated frame for %s [TC %s]: response='%s' "
-                    "(decision=%s, score=%.2f, latency=%.1fms, tags=%s)",
+                    "DecisionEngine [%s] escalated frame for %s [TC %s]: "
+                    "reason=%s p_threat=%.3f latency=%.1fms tags=%s",
+                    routing.action,
                     self.config.drone_id,
                     formatted_timecode or "N/A",
-                    triage.raw_output.strip() if triage.raw_output else "",
-                    triage.tier1_decision,
+                    routing.reason,
                     triage.triage_score,
                     triage.tier1_latency_ms,
                     triage.tags,
                 )
 
-            # Tier 2: Deep Contextual Reasoning via Gemini 3.6 Flash or Gemma 4
-            target_is_gemma = (
-                workflow_config.escalation_target == EscalationTarget.GEMMA
-                and self.gemma_client is not None
-            )
-            if target_is_gemma:
-                source_tier = "escalation"
-                source_model = "gemma"
-                model_name = (
-                    workflow_config.gemma_model
-                    or getattr(self.gemma_client, "model_name", None)
-                    or self.settings.gemma_model_name
+            # Tier 2: Deep Contextual Reasoning protected by Single-Flight Anti-Snowball Gate
+            record_cooldown = bool(self.gemma_client and workflow_config.enable_tier1_gemma)
+            self.decision_engine.mark_tier2_started(self.config.drone_id)
+            try:
+                target_is_gemma = (
+                    workflow_config.escalation_target == EscalationTarget.GEMMA
+                    and self.gemma_client is not None
                 )
-                analysis = await self.gemma_client.deep_analyze_frame(
-                    frame_bytes=frame_bytes_data,
-                    escalation_prompt=workflow_config.gemma_escalation_prompt,
-                    drone_id=self.config.drone_id,
-                    gemma_service_url=workflow_config.gemma_service_url,
-                    gemma_model=workflow_config.gemma_model,
-                    gemma_timeout_seconds=workflow_config.gemma_timeout_seconds,
-                    vllm_temperature=workflow_config.vllm_temperature,
-                    vllm_max_tokens=workflow_config.vllm_max_tokens,
-                )
-            else:
-                source_tier = "escalation"
-                source_model = "gemini"
-                model_name = (
-                    workflow_config.gemini_model
-                    or getattr(self.analyzer, "model", None)
-                    or self.settings.gemini_model
-                )
-                analysis = await self.analyzer.analyze_frame(
-                    image_bytes=frame_bytes_data,
-                    mime_type="image/jpeg",
-                    prompt=workflow_config.gemini_escalation_prompt,
-                    model=model_name,
+                if target_is_gemma:
+                    source_tier = "escalation"
+                    source_model = "gemma"
+                    model_name = (
+                        workflow_config.gemma_model
+                        or getattr(self.gemma_client, "model_name", None)
+                        or self.settings.gemma_model_name
+                    )
+                    assert self.gemma_client is not None
+                    analysis = await self.gemma_client.deep_analyze_frame(
+                        frame_bytes=frame_bytes_data,
+                        escalation_prompt=workflow_config.gemma_escalation_prompt,
+                        drone_id=self.config.drone_id,
+                        gemma_service_url=workflow_config.gemma_service_url,
+                        gemma_model=workflow_config.gemma_model,
+                        gemma_timeout_seconds=workflow_config.gemma_timeout_seconds,
+                        vllm_temperature=workflow_config.vllm_temperature,
+                        vllm_max_tokens=workflow_config.vllm_max_tokens,
+                    )
+                else:
+                    source_tier = "escalation"
+                    source_model = "gemini"
+                    model_name = (
+                        workflow_config.gemini_model
+                        or getattr(self.analyzer, "model", None)
+                        or self.settings.gemini_model
+                    )
+                    analysis = await self.analyzer.analyze_frame(
+                        image_bytes=frame_bytes_data,
+                        mime_type="image/jpeg",
+                        prompt=workflow_config.gemini_escalation_prompt,
+                        model=model_name,
+                    )
+            finally:
+                self.decision_engine.mark_tier2_finished(
+                    self.config.drone_id, record_cooldown=record_cooldown
                 )
 
             summary_text = (
@@ -436,27 +471,36 @@ class DroneStreamProcessor:
                 summary_text,
             )
 
-            is_potential_threat = (
-                analysis.suspicious_activity_detected or analysis.threat_level != ThreatLevel.NONE
-            )
-            threat_active = is_potential_threat and (
-                analysis.confidence_score >= workflow_config.gemma_triage_threshold
+            dispatch = self.decision_engine.evaluate_tier2_dispatch(
+                drone_id=self.config.drone_id,
+                analysis=analysis,
+                config=workflow_config,
+                video_timestamp_sec=video_timestamp_sec,
             )
 
-            if threat_active:
+            if dispatch.action == DispatchAction.STALE_WATERMARK_DROPPED:
+                logger.info(
+                    "Dropped out-of-order stale Tier 2 frame for Drone %s [TC %s]: %s",
+                    self.config.drone_id,
+                    formatted_timecode or "N/A",
+                    dispatch.reason,
+                )
+                return
+
+            if dispatch.trigger_alert:
                 self.config.status = StreamStatus.ALERT
                 threat_level = analysis.threat_level
                 category = analysis.category
                 bounding_boxes = analysis.bounding_boxes
                 logger.warning(
                     "DISPATCH ALERT from Drone %s [TC %s]: [%s] %s "
-                    "(confidence=%.2f >= threshold=%.2f, source=%s/%s)",
+                    "(confidence=%.2f >= policy=%.2f, source=%s/%s)",
                     self.config.drone_id,
                     formatted_timecode or "N/A",
                     threat_level,
                     summary_text,
                     analysis.confidence_score,
-                    workflow_config.gemma_triage_threshold,
+                    dispatch.effective_threshold,
                     source_tier,
                     source_model,
                 )
@@ -465,16 +509,16 @@ class DroneStreamProcessor:
                 threat_level = ThreatLevel.NONE
                 category = IncidentCategory.CLEAR
                 bounding_boxes = []
-                if is_potential_threat:
+                if dispatch.action == DispatchAction.SUPPRESSED_BELOW_POLICY:
                     logger.info(
-                        "Suppressed below-threshold threat from Drone %s [TC %s]: [%s] %s "
-                        "(confidence=%.2f < threshold=%.2f, source=%s/%s)",
+                        "Suppressed below-policy threat from Drone %s [TC %s]: [%s] %s "
+                        "(confidence=%.2f < policy=%.2f, source=%s/%s)",
                         self.config.drone_id,
                         formatted_timecode or "N/A",
                         analysis.threat_level,
                         summary_text,
                         analysis.confidence_score,
-                        workflow_config.gemma_triage_threshold,
+                        dispatch.effective_threshold,
                         source_tier,
                         source_model,
                     )
@@ -497,6 +541,8 @@ class DroneStreamProcessor:
                 scene_summary=summary_text,
                 raw_response=analysis.raw_response,
                 latency_ms=analysis.latency_ms,
+                routing_action=routing_action_str,
+                dispatch_action=str(dispatch.action),
             )
 
             if self.event_callback:

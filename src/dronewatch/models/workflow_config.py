@@ -3,11 +3,19 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 DEFAULT_GEMMA_TRIAGE_PROMPT: str = (
     "detect campus security anomalies, unauthorized persons, perimeter breaches, "
     "or vehicles and equipment on pedestrian walkways; answer safe or alert"
+)
+
+DEFAULT_SYSTEM1_DECISION_PROMPT: str = (
+    "Evaluate this campus security drone frame. Classify into exactly one label:\n"
+    "- SAFE: Normal routine campus scene, empty area, or authorized walkway use.\n"
+    "- SUSPICIOUS: Ambiguous motion, unattended object, loitering, or walkway obstruction.\n"
+    "- CRITICAL: Active perimeter breach, intruder climbing, weapon, fire, or imminent danger.\n"
+    "Respond with one word only: SAFE, SUSPICIOUS, or CRITICAL."
 )
 
 DEFAULT_ALERT_KEYWORDS: tuple[str, ...] = (
@@ -96,6 +104,13 @@ class AmbiguityPolicy(StrEnum):
     CONSERVATIVE = "CONSERVATIVE"
 
 
+class TriageMode(StrEnum):
+    """Evaluation strategy for Tier 1 front-line triage."""
+
+    DECISION_FRAMEWORK = "DECISION_FRAMEWORK"
+    KEYWORD_LEGACY = "KEYWORD_LEGACY"
+
+
 class WorkflowConfig(BaseModel):
     """Complete active workflow configuration model."""
 
@@ -105,15 +120,51 @@ class WorkflowConfig(BaseModel):
         default=True,
         description="Whether Tier 1 Gemma triage is active before escalation",
     )
+    triage_mode: TriageMode = Field(
+        default=TriageMode.DECISION_FRAMEWORK,
+        description="System 1 logprob/choice decision framework vs legacy keyword matching",
+    )
     gemma_triage_prompt: str = Field(
         default=DEFAULT_GEMMA_TRIAGE_PROMPT,
-        description="Prompt guiding front-line Gemma 4 triage for SAFE vs ALERT verdict",
+        description="Prompt guiding front-line Gemma 4 triage",
+    )
+    suppress_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Band 0 ceiling: P(threat) below this is suppressed immediately",
     )
     gemma_triage_threshold: float = Field(
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="Confidence cutoff above which a frame escalates",
+        description="Band 2 cutoff: P(threat) at or above this escalates immediately",
+    )
+    dispatch_confidence_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional decoupled Tier 2 dispatch cutoff (defaults to gemma_triage_threshold)"
+        ),
+    )
+    corroboration_hits: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Required Band 1 observations (k) within window (n) before escalating",
+    )
+    corroboration_window: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Non-blocking ring buffer size (n) for temporal corroboration",
+    )
+    escalation_cooldown_seconds: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=60.0,
+        description="Anti-snowball cooldown suppressing duplicate non-CRITICAL Tier 2 calls",
     )
     escalation_target: EscalationTarget = Field(
         default=EscalationTarget.GEMINI,
@@ -165,7 +216,7 @@ class WorkflowConfig(BaseModel):
     )
     vllm_max_tokens: int = Field(
         default=32,
-        ge=8,
+        ge=1,
         le=512,
         description="Max tokens generated for front-line triage",
     )
@@ -179,21 +230,31 @@ class WorkflowConfig(BaseModel):
     )
     version: int = Field(default=1, ge=1, description="Configuration revision version number")
 
-    @field_validator("escalation_target", mode="before")
+    @field_validator("escalation_target", "ambiguity_policy", "triage_mode", mode="before")
     @classmethod
-    def normalize_escalation_target(cls, v: object) -> object:
+    def normalize_enum_upper(cls, v: object) -> object:
         """Coerce string enum input to uppercase."""
         if isinstance(v, str):
             return v.upper()
         return v
 
-    @field_validator("ambiguity_policy", mode="before")
-    @classmethod
-    def normalize_ambiguity_policy(cls, v: object) -> object:
-        """Coerce string enum input to uppercase."""
-        if isinstance(v, str):
-            return v.upper()
-        return v
+    @model_validator(mode="after")
+    def validate_corroboration_bounds(self) -> "WorkflowConfig":
+        """Ensure required hits k does not exceed sliding window n."""
+        if self.corroboration_hits > self.corroboration_window:
+            msg = (
+                f"corroboration_hits ({self.corroboration_hits}) cannot exceed "
+                f"corroboration_window ({self.corroboration_window})"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def effective_dispatch_threshold(self) -> float:
+        """Return explicit Tier 2 dispatch threshold or fall back to gemma_triage_threshold."""
+        if self.dispatch_confidence_threshold is not None:
+            return self.dispatch_confidence_threshold
+        return self.gemma_triage_threshold
 
 
 class WorkflowConfigUpdate(BaseModel):
@@ -202,8 +263,14 @@ class WorkflowConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_tier1_gemma: bool | None = None
+    triage_mode: TriageMode | None = None
     gemma_triage_prompt: str | None = Field(default=None, min_length=5)
+    suppress_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     gemma_triage_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    dispatch_confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    corroboration_hits: int | None = Field(default=None, ge=1, le=5)
+    corroboration_window: int | None = Field(default=None, ge=1, le=10)
+    escalation_cooldown_seconds: float | None = Field(default=None, ge=0.0, le=60.0)
     escalation_target: EscalationTarget | None = None
     gemini_escalation_prompt: str | None = Field(default=None, min_length=10)
     gemma_escalation_prompt: str | None = Field(default=None, min_length=10)
@@ -219,19 +286,11 @@ class WorkflowConfigUpdate(BaseModel):
     benign_keywords: list[str] | None = None
     ambiguity_policy: AmbiguityPolicy | None = None
     vllm_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    vllm_max_tokens: int | None = Field(default=None, ge=8, le=512)
+    vllm_max_tokens: int | None = Field(default=None, ge=1, le=512)
 
-    @field_validator("escalation_target", mode="before")
+    @field_validator("escalation_target", "ambiguity_policy", "triage_mode", mode="before")
     @classmethod
-    def normalize_escalation_target(cls, v: object) -> object:
-        """Coerce string enum input to uppercase."""
-        if isinstance(v, str):
-            return v.upper()
-        return v
-
-    @field_validator("ambiguity_policy", mode="before")
-    @classmethod
-    def normalize_ambiguity_policy(cls, v: object) -> object:
+    def normalize_enum_upper(cls, v: object) -> object:
         """Coerce string enum input to uppercase."""
         if isinstance(v, str):
             return v.upper()

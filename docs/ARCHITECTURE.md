@@ -1,7 +1,7 @@
 # DroneWatch Architecture Design Document
-**Hierarchical Two-Tier AI Inference: Front-Line Gemma Triage & Gemini Escalation**
+**System 1 Decision Framework: Calibrated Logprob Triage, Anti-Snowball Corroboration & Tier 2 Escalation**
 
-- **Document Version:** 2.2.0
+- **Document Version:** 3.0.0
 - **Status:** Approved Architecture Specification
 - **Author:** Klara Lindermann, Staff Google Cloud Architect & Data Platform Engineer
 - **Target Runtime:** Google Cloud Run, Vertex AI, AlloyDB for PostgreSQL
@@ -12,20 +12,17 @@
 
 DroneWatch is an automated campus security surveillance and aerial threat detection system. Patrolling drones continuously ingest high-definition RTSP video feeds and archived GCS MP4 streams, screening for perimeter breaches, trespassing, unattended objects, unauthorized vehicles on walkways, and safety hazards.
 
-### The Problem: Monolithic Vision Inference at Scale
-In Version 1.0, any video frame passing an OpenCV motion differencing threshold is forwarded directly to `gemini-3.6-flash` hosted on Vertex AI. While `gemini-3.6-flash` delivers outstanding zero-shot reasoning and high-precision bounding box extraction, routing all moving frames to a frontier multimodal model introduces critical architectural inefficiencies:
+### The Problem: Monolithic Vision Inference & Uncalibrated Keyword Heuristics
+In Version 1.0, any video frame passing an OpenCV motion differencing threshold was forwarded directly to `gemini-3.6-flash` hosted on Vertex AI (~600ms–1,200ms round-trip latency and linear API cost scaling). Version 2.0 introduced a private Cloud Run Gemma 4 triage tier, which cut Gemini API volume by >93%—but relied on free-form text generation (`max_tokens=32`) and static keyword bucket heuristics (`0.05` / `0.80` / `0.90`) while sharing a single threshold across Tier 1 screening and Tier 2 operator sirens.
 
-1. **Economic Inefficiency (Unbounded API Costs):** In continuous 24/7 surveillance, over 95% of motion-triggered frames are benign (swaying branches, shifting cloud shadows, birds, authorized ground maintenance crews, or routine pedestrians on designated walkways). Paying frontier token rates to repeatedly classify empty lawns or trees is a failure of cloud engineering stewardship.
-2. **Quota & Rate-Limiting Pressure:** Scaling from 4 drones to 16+ drones creates high burst volumes against Vertex AI regional quotas during windy conditions or class change intervals.
-3. **Latency Profile:** Frontier multimodal inference over external endpoints exhibits a round-trip latency of 600ms–1,200ms. For benign frames, this creates unnecessary worker queue backpressure.
+### The Solution: v3.0 System 1 Decision Framework
+Version 3.0 upgrades the two-tier cascade into a **System 1 Decision Framework** inspired by constrained logprob decision engines (e.g., Jev) while preserving zero-egress VPC privacy and continuous HUD scene telemetry:
+- **Tier 0 (Algorithmic Gate):** Local OpenCV Gaussian frame differencing filters out static background scenery (~2ms, zero cloud cost).
+- **Tier 1 (Calibrated System 1 Vision Triage):** Private Cloud Run GPU service (`google/gemma-4-E2B-it` on NVIDIA RTX Pro 6000) executing single-token constrained choice (`SAFE` | `SUSPICIOUS` | `CRITICAL`) via vLLM `guided_choice` + `top_logprobs=10` in ~15ms–25ms. Exact softmax normalization yields calibrated posterior probabilities $P(\text{threat})$ and normalized Shannon entropy $H_{\text{norm}}$.
+- **Deterministic Decision Engine (`DecisionEngine`):** Decouples raw model output from operational policy using 3-band routing (Band 0 Immediate Suppress, Band 1 $O(1)$ Non-Blocking $k\text{-of-}n$ Temporal Corroboration, Band 2 Immediate Escalate) plus strict **anti-snowball backpressure** (per-stream single-flight Tier 2 lock, configurable escalation cooldown, and monotonic video timestamp watermarks).
+- **Tier 2 (Deep Contextual Reasoning & Decoupled Dispatch):** Escalated candidates route to `gemini-3.6-flash` on Vertex AI (or self-hosted Gemma 4 / `google/diffusiongemma-26B-A4B-it` on vLLM) and are evaluated against an independent `dispatch_confidence_threshold` before triggering operator alerts.
 
-### The Solution: Two-Tier Hierarchical Inference
-Version 2.0 establishes a **Two-Tier (Cascade) Inference Architecture**:
-- **Tier 0 (Algorithmic Gate):** Local OpenCV Gaussian frame differencing filters out sensor noise and static scenery (~2ms, zero cloud cost).
-- **Tier 1 (Front-Line Vision Triage):** A private Google Cloud Run microservice running Google's open vision-language model **Gemma 4** (`gemma-4-E2B-it`). Operating on an NVIDIA L4 GPU, it performs binary/tri-state triage in 35ms–50ms using Gemma 4's native visual understanding and low-overhead token budgeting (70–140 tokens). Frames deemed normal/benign are dropped immediately.
-- **Tier 2 (Deep Contextual Reasoning & Dispatch):** Only frames flagged as suspicious, anomalous, or ambiguous by Tier 1 are escalated to `gemini-3.6-flash` on Vertex AI. Gemini generates full threat narratives, bounding boxes, severity classifications, and alerts for dispatch.
-
-This cascade reduces Gemini API consumption by **93%–97%**, guarantees deterministic cost scaling as drone fleets expand, and maintains sub-second end-to-end alerting for genuine security incidents.
+This architecture eliminates keyword negation bugs, prevents Tier 2 latency cascades during sustained campus activity, and maintains sub-2.0s end-to-end alerting for corroborated incidents.
 
 ---
 
@@ -386,14 +383,19 @@ INFO: Tier 1 Gemma vision triage [drone-alpha]: prompt='detect campus security a
    - Support selectable Gemini escalation models (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-4-aragon`, and custom model identifiers).
    - Implement React Administration UI with real-time dirty state tracking and reset capabilities.
    - Stream HUD badges and Alert Log telemetry tracking origin tier (`triage`/`escalation`), model family, model identifier, and inference latency.
-   - Full test suite expansion to 57 unit and integration tests.
+4. **Phase 4: System 1 Decision Framework & Anti-Snowball Corroboration (Completed — v3.0)**
+   - Replace free-form keyword heuristics with vLLM `guided_choice` (`SAFE` | `SUSPICIOUS` | `CRITICAL`) and exact softmax calibration over `top_logprobs`.
+   - Introduce deterministic `DecisionEngine` separating 3-band Tier 1 routing (`SUPPRESS`, `CORROBORATE_HOLD`, `ESCALATE_CORROBORATED`, `ESCALATE_IMMEDIATE`, `COOLDOWN_SKIP`) from decoupled Tier 2 dispatch policy (`dispatch_confidence_threshold`).
+   - Guarantee non-cascading frame latency via $O(1)$ per-stream ring buffers, single-flight Tier 2 locks, configurable escalation cooldowns, and monotonic video timestamp watermarks (`STALE_WATERMARK_DROPPED`).
+   - Add clause-scoped negation-safe fallback (`_strip_negated_clauses`) and selectable `google/diffusiongemma-26B-A4B-it` Tier 2 support.
+   - Expand automated verification suite to 72 passing `pytest` tests with zero `ruff` warnings.
 
 ---
 
 ## 11. Dynamic Workflow Configuration & Administration Engine
 
 ### 11.1 Architectural Rationale
-Operational campus environments require dynamic tuning of vision thresholds, triage prompts, and multimodal reasoning models without redeploying microservices or interrupting live RTSP video feeds. Version 2.2 introduces the **Dynamic Workflow Configuration Engine**, allowing security operators to customize AI behavior across all active drone feeds in real time.
+Operational campus environments require dynamic tuning of vision thresholds, triage prompts, and multimodal reasoning models without redeploying microservices or interrupting live RTSP video feeds. Version 2.2+ introduces the **Dynamic Workflow Configuration Engine**, extended in Version 3.0 with full System 1 Decision Framework controls across all active drone feeds in real time.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -407,7 +409,7 @@ Operational campus environments require dynamic tuning of vision thresholds, tri
 │                                                                                        │
 │   ┌───────────────────────────┐                     ┌──────────────────────────────┐   │
 │   │ WorkflowConfigUpdate      │                     │ Database Store (AlloyDB)     │   │
-│   │ Pydantic Validation       ├────────────────────►│ table: workflow_config       │   │
+│   │ Pydantic Validation       ├────────────────────►│ table: workflow_settings     │   │
 │   │ (extra="forbid")          │                     │ singleton row (id=1)         │   │
 │   └─────────────┬─────────────┘                     └──────────────┬───────────────┘   │
 │                 │                                                  │                   │
@@ -420,30 +422,35 @@ Operational campus environments require dynamic tuning of vision thresholds, tri
                                             │ Injected per evaluated frame
                                             ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              DroneStreamProcessor Engine                               │
+│                     DroneStreamProcessor + DecisionEngine (v3.0)                       │
 │                                                                                        │
 │   1. Resolve active WorkflowConfig                                                     │
-│   2. If enable_tier1_gemma:                                                            │
-│        Call GemmaTriageClient with gemma_triage_prompt & gemma_triage_threshold        │
-│        If anomaly detected -> Escalate to Tier 2                                       │
-│      Else:                                                                             │
-│        Bypass Tier 1 -> Directly escalate all motion frames                            │
-│   3. Tier 2 Escalation Target:                                                         │
-│      ├─► GEMINI: Invoke GeminiVideoAnalyzer with gemini_model & gemini_escalation_prompt│
-│      └─► GEMMA:  Invoke GemmaTriageClient.deep_analyze_frame with gemma_escalation_prompt│
-│   4. Broadcast IncidentEvent with source_tier, source_model, model_name & latency_ms   │
+│   2. Tier 1 Triage (GemmaTriageClient -> DecisionEngine.evaluate_tier1):               │
+│      ├─► Band 0 (< suppress_threshold): SUPPRESS immediately                           │
+│      ├─► Band 1 (ambiguous): O(1) k-of-n ring buffer -> CORROBORATE_HOLD / ESCALATE    │
+│      └─► Band 2 (>= gemma_triage_threshold): ESCALATE_IMMEDIATE (single-flight gated)  │
+│   3. Tier 2 Escalation Target (DecisionEngine.evaluate_tier2_dispatch):                │
+│      ├─► GEMINI: Vertex AI GeminiVideoAnalyzer                                         │
+│      └─► GEMMA:  Cloud Run vLLM (Gemma 4 or DiffusionGemma 26B-A4B)                    │
+│   4. Broadcast IncidentEvent with routing_action, dispatch_action & latency_ms         │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 11.2 AlloyDB Schema Specification
-Configuration settings are persisted in AlloyDB within dedicated configuration and audit tables:
+Configuration settings and decision audit fields are persisted in AlloyDB:
 
 ```sql
 CREATE TABLE IF NOT EXISTS workflow_settings (
     id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     enable_tier1_gemma BOOLEAN NOT NULL DEFAULT TRUE,
+    triage_mode VARCHAR(32) NOT NULL DEFAULT 'DECISION_FRAMEWORK',
     escalation_target VARCHAR(32) NOT NULL DEFAULT 'GEMINI',
+    suppress_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.25,
     gemma_triage_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.50,
+    dispatch_confidence_threshold DOUBLE PRECISION,
+    corroboration_hits INT NOT NULL DEFAULT 2,
+    corroboration_window INT NOT NULL DEFAULT 3,
+    escalation_cooldown_seconds DOUBLE PRECISION NOT NULL DEFAULT 3.0,
     gemma_triage_prompt TEXT NOT NULL,
     gemini_escalation_prompt TEXT NOT NULL,
     gemma_escalation_prompt TEXT NOT NULL,
@@ -478,10 +485,10 @@ CREATE TABLE IF NOT EXISTS workflow_settings_history (
 | `escalation_target=GEMINI`, `gemini_model=gemini-3.6-flash` | Vertex AI Gemini | `gemini-3.6-flash` | `gemini_escalation_prompt` | Default production model |
 | `escalation_target=GEMINI`, `gemini_model=gemini-4-aragon` | Vertex AI Gemini | `gemini-4-aragon` | `gemini_escalation_prompt` | Next-generation multimodal model |
 | `escalation_target=GEMMA`, `gemma_model=google/gemma-4-E2B-it` | Cloud Run GPU | `google/gemma-4-E2B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
-| `escalation_target=GEMMA`, `gemma_model=google/gemma-4-4B-it` | Cloud Run GPU | `google/gemma-4-4B-it` | `gemma_escalation_prompt` | Fail-open circuit breaker to Gemini Flash if GPU unavailable |
+| `escalation_target=GEMMA`, `gemma_model=google/diffusiongemma-26B-A4B-it` | Cloud Run GPU | `google/diffusiongemma-26B-A4B-it` | `gemma_escalation_prompt` | Parallel block-denoising MoE JSON generation (~3x–5x faster structured output) |
 
-### 11.4 Gemma as Tier 2 Deep Inspection Model
-When configured for Gemma escalation (`escalation_target=GEMMA`), `GemmaTriageClient.deep_analyze_frame()` directs the model to output a strictly compliant JSON schema matching Pydantic `AnalysisResult`:
+### 11.4 Gemma & DiffusionGemma as Tier 2 Deep Inspection Models
+When configured for self-hosted escalation (`escalation_target=GEMMA`), `GemmaTriageClient.deep_analyze_frame()` directs the model (`google/gemma-4-E2B-it` or `google/diffusiongemma-26B-A4B-it`) to output a strictly compliant JSON schema matching Pydantic `AnalysisResult`:
 
 ```json
 {
@@ -497,28 +504,49 @@ When configured for Gemma escalation (`escalation_target=GEMMA`), `GemmaTriageCl
 }
 ```
 
-Threat alerts are gated on `confidence_score >= gemma_triage_threshold`, preventing low-confidence hallucinations from triggering critical sirens or pilot alerts. Furthermore, unstructured or semi-structured model completions containing hazards (e.g. equipment on pedestrian paths) are robustly parsed via keyword-aware categorization, preventing false `CLEAR` verdicts.
+Threat alerts are gated on `confidence_score >= effective_dispatch_threshold` (`dispatch_confidence_threshold` if configured, else `gemma_triage_threshold`), allowing sensitive Tier 1 screening without noisy operator sirens.
 
-### 11.5 Gemma 4 Triage Engine & Ambiguity Policy Resolution
-To resolve borderline frames and prevent false negatives (such as equipment obstructions on pedestrian walkways), the Tier 1 triage engine supports fine-grained operational policies:
-
-1. **Ambiguity Resolution Policy (`AmbiguityPolicy`):**
-   - **`FAIL_SAFE` (Default):** When a model response contains conflicting tokens or fails to match explicit alert or benign keywords, the engine treats the situation as a potential hazard. It assigns an escalation score of $0.80$ and forwards the frame to Tier 2 frontier analysis.
-   - **`CONSERVATIVE`:** Suppresses borderline classifications ($0.20$ score) to minimize frontier model calls when operational budget takes precedence over edge-case detection.
-2. **Dynamic Keyword Taxonomy:**
-   - Instead of static, hardcoded regular expressions, the engine evaluates against user-defined alert keywords (`equipment`, `machinery`, `hazard`, `obstruction`, etc.) and benign keywords (`safe`, `normal`, `clear`).
-   - Keyword arrays are persisted in AlloyDB as `JSONB` and editable directly in the UI via tag chips.
-3. **vLLM Sampling Controls:**
-   - Operators can tune temperature (defaulting to deterministic greedy decoding `0.0`) and token limits (`32` for binary triage, up to `512` for detailed escalation) directly from the administration dashboard.
+### 11.5 Clause-Scoped Negation Safety & Legacy Fallback
+When operating in `KEYWORD_LEGACY` mode or when a vLLM server lacks `top_logprobs` / `guided_choice` support (triggering automatic HTTP 400/422 retry fallback), `GemmaTriageClient._strip_negated_clauses()` splits text along punctuation and contrastive conjunction boundaries (`but`, `however`, `except`, `yet`, `although`, `while`) before stripping negated clauses (`"no hazards or unauthorized vehicles"`). This eliminates false-positive escalations on benign negated statements while preserving true alerts after contrastive clauses (`"No fire visible, but an intruder is climbing the fence"`).
 
 ### 11.6 Observability & Telemetry Audit Contract
-Every evaluated frame and security incident publishes full attribution metadata across WebSockets and Cloud Logging:
+Every evaluated frame and security incident publishes full attribution metadata across WebSockets, AlloyDB, and Cloud Logging:
 
 - `source_tier`: Analysis tier producing the verdict (`"triage"` or `"escalation"`).
 - `source_model`: Model family (`"gemma"` or `"gemini"`).
-- `model_name`: Full model identifier string (e.g., `"gemini-3.8-flash"` or `"google/gemma-4-E2B-it"`).
-- `scene_summary`: Concise summary displayed on HUD.
-- `raw_response`: Unmodified response text or JSON string for compliance audits.
-- `latency_ms`: Complete inference and network transit latency in milliseconds.
+- `model_name`: Full model identifier string (e.g., `"gemini-3.6-flash"` or `"google/gemma-4-E2B-it"`).
+- `routing_action`: Deterministic Tier 1 `DecisionEngine` transition (`"SUPPRESS"`, `"CORROBORATE_HOLD"`, `"ESCALATE_CORROBORATED"`, `"ESCALATE_IMMEDIATE"`, `"COOLDOWN_SKIP"`, `"CIRCUIT_BREAKER_BYPASS"`).
+- `dispatch_action`: Deterministic Tier 2 policy decision (`"ACTIVE_ALERT"`, `"SUPPRESSED_BELOW_POLICY"`, `"STALE_WATERMARK_DROPPED"`, `"CLEAR_ROUTINE"`).
+- `scene_summary` / `raw_response` / `latency_ms`: Full operator and compliance trace.
+
+---
+
+## 12. System 1 Decision Framework & Anti-Snowball Architecture (v3.0)
+
+### 12.1 Constrained Choice & Softmax Logprob Calibration
+In `DECISION_FRAMEWORK` mode (`TriageMode.DECISION_FRAMEWORK`), `GemmaTriageClient` sends `max_tokens=3`, `temperature=0.0`, `logprobs=True`, `top_logprobs=10`, and `guided_choice=["SAFE", "SUSPICIOUS", "CRITICAL"]` to vLLM on the NVIDIA RTX Pro 6000 (`nvidia-rtx-pro-6000`, 20 vCPU / 80 GiB RAM).
+
+Given first-position `top_logprobs` $\ell_c$ for $c \in \mathcal{C} = \{\text{SAFE}, \text{SUSPICIOUS}, \text{CRITICAL}\}$ (defaulting missing classes to $\ell_{\min} = -20.0$), exact calibrated class probabilities and normalized Shannon entropy are computed in Python:
+
+$$P(c) = \frac{\exp(\ell_c - \ell_{\max})}{\sum_{k \in \mathcal{C}} \exp(\ell_k - \ell_{\max})}, \qquad P(\text{threat}) = P(\text{SUSPICIOUS}) + P(\text{CRITICAL})$$
+
+$$H_{\text{norm}} = -\frac{1}{\ln 3} \sum_{c \in \mathcal{C}} P(c) \ln P(c) \in [0, 1]$$
+
+### 12.2 Three-Band Routing & Non-Blocking Temporal Corroboration
+`DecisionEngine.evaluate_tier1()` maps $(P(\text{threat}), H_{\text{norm}}, \text{verdict})$ into three operational bands:
+
+| Band | Condition | Action (`RoutingAction`) | Behavior |
+|---|---|---|---|
+| **Band 0 (Suppress)** | $P(\text{threat}) < \tau_{\text{suppress}}$ (`0.25`) and low entropy | `SUPPRESS` | Immediate drop (~20ms); zero Tier 2 cost |
+| **Band 1 (Corroborate)** | $\tau_{\text{suppress}} \le P(\text{threat}) < \tau_{\text{escalate}}$ (`0.50`) or high entropy ($H_{\text{norm}} \ge 0.72$ under `FAIL_SAFE`) | `CORROBORATE_HOLD` / `ESCALATE_CORROBORATED` | Appends observation to $O(1)$ per-stream `deque(maxlen=n)` and returns immediately; escalates once $k\text{-of-}n$ (`2-of-3`) frames corroborate |
+| **Band 2 (Immediate)** | $P(\text{threat}) \ge \tau_{\text{escalate}}$ (`0.50`) or `verdict == CRITICAL` | `ESCALATE_IMMEDIATE` | Escalates on the very first frame |
+
+### 12.3 Anti-Snowball Backpressure Guarantees
+To ensure the 2.0s corroboration SLA never cascades or stalls live MJPEG feeds during sustained campus motion:
+
+1. **Zero-Sleep Ring Buffer:** `CORROBORATE_HOLD` never awaits future frames or holds concurrency semaphores; each 1 FPS evaluation tick completes in ~20ms.
+2. **Per-Stream Single-Flight Lock (`tier2_in_flight`) & Cooldown (`escalation_cooldown_seconds`):** While a 900ms Tier 2 call is in flight—or within the 3.0s post-escalation cooldown window—subsequent non-`CRITICAL` escalations return `COOLDOWN_SKIP` instead of piling up queued Vertex AI requests. Genuine `CRITICAL` spikes ($P(\text{CRITICAL}) \ge 0.50$) bypass cooldown immediately.
+3. **Monotonic Video Timestamp Watermark (`last_dispatched_video_ts`):** `DecisionEngine.evaluate_tier2_dispatch()` drops any out-of-order Tier 2 completion whose video timestamp precedes an already-dispatched alert (`STALE_WATERMARK_DROPPED`), guaranteeing strictly monotonic HUD alerts.
+
 
 

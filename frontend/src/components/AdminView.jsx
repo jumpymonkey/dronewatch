@@ -28,6 +28,10 @@ const GEMINI_MODELS = [
 
 const GEMMA_MODELS = [
   { id: 'google/gemma-4-E2B-it', label: 'google/gemma-4-E2B-it (Default Cloud Run Gemma 4)' },
+  {
+    id: 'google/diffusiongemma-26B-A4B-it',
+    label: 'google/diffusiongemma-26B-A4B-it (DiffusionGemma Block-Denoising MoE)',
+  },
   { id: 'google/gemma-3-4b-it', label: 'google/gemma-3-4b-it (Gemma 3 4B Vision / Instruct)' },
   { id: 'google/gemma-4-4b-it', label: 'google/gemma-4-4b-it (Gemma 4 4B Multimodal)' },
   { id: 'google/gemma-4-9b-it', label: 'google/gemma-4-9b-it (Gemma 4 9B High Capacity)' },
@@ -200,6 +204,14 @@ export default function AdminView() {
 
   const normalizeConfig = (data) => ({
     ...data,
+    triage_mode: data.triage_mode || 'DECISION_FRAMEWORK',
+    suppress_threshold: data.suppress_threshold ?? 0.25,
+    gemma_triage_threshold: data.gemma_triage_threshold ?? 0.5,
+    dispatch_confidence_threshold:
+      data.dispatch_confidence_threshold != null ? data.dispatch_confidence_threshold : null,
+    corroboration_hits: data.corroboration_hits ?? 2,
+    corroboration_window: data.corroboration_window ?? 3,
+    escalation_cooldown_seconds: data.escalation_cooldown_seconds ?? 3.0,
     alert_keywords: data.alert_keywords || [...DEFAULT_ALERT_KEYWORDS],
     benign_keywords: data.benign_keywords || [...DEFAULT_BENIGN_KEYWORDS],
     ambiguity_policy: data.ambiguity_policy || 'FAIL_SAFE',
@@ -253,8 +265,14 @@ export default function AdminView() {
     config &&
     initialConfig &&
     (config.enable_tier1_gemma !== initialConfig.enable_tier1_gemma ||
+      config.triage_mode !== initialConfig.triage_mode ||
       config.gemma_triage_prompt !== initialConfig.gemma_triage_prompt ||
+      config.suppress_threshold !== initialConfig.suppress_threshold ||
       config.gemma_triage_threshold !== initialConfig.gemma_triage_threshold ||
+      config.dispatch_confidence_threshold !== initialConfig.dispatch_confidence_threshold ||
+      config.corroboration_hits !== initialConfig.corroboration_hits ||
+      config.corroboration_window !== initialConfig.corroboration_window ||
+      config.escalation_cooldown_seconds !== initialConfig.escalation_cooldown_seconds ||
       config.escalation_target !== initialConfig.escalation_target ||
       config.gemini_escalation_prompt !== initialConfig.gemini_escalation_prompt ||
       config.gemma_escalation_prompt !== initialConfig.gemma_escalation_prompt ||
@@ -278,8 +296,17 @@ export default function AdminView() {
 
     const payload = {
       enable_tier1_gemma: config.enable_tier1_gemma,
+      triage_mode: config.triage_mode || 'DECISION_FRAMEWORK',
       gemma_triage_prompt: config.gemma_triage_prompt,
+      suppress_threshold: parseFloat(config.suppress_threshold),
       gemma_triage_threshold: parseFloat(config.gemma_triage_threshold),
+      dispatch_confidence_threshold:
+        config.dispatch_confidence_threshold != null
+          ? parseFloat(config.dispatch_confidence_threshold)
+          : null,
+      corroboration_hits: parseInt(config.corroboration_hits, 10),
+      corroboration_window: parseInt(config.corroboration_window, 10),
+      escalation_cooldown_seconds: parseFloat(config.escalation_cooldown_seconds),
       escalation_target: config.escalation_target,
       gemini_escalation_prompt: config.gemini_escalation_prompt,
       gemma_escalation_prompt: config.gemma_escalation_prompt,
@@ -461,8 +488,9 @@ export default function AdminView() {
           </div>
 
           <p className="section-description">
-            Low-latency local screening using Google Gemma 4 on Cloud Run. Benign frames are filtered
-            at zero API cost, preserving latency and quota.
+            Low-latency local screening using Google Gemma 4 on Cloud Run. System 1 Decision Framework
+            uses constrained vLLM choice (`SAFE` / `SUSPICIOUS` / `CRITICAL`) and exact softmax logprob
+            calibration with 3-band non-blocking routing.
           </p>
 
           <div
@@ -470,10 +498,80 @@ export default function AdminView() {
               !config?.enable_tier1_gemma ? 'disabled-dim' : ''
             }`}
           >
+            {/* Triage Mode Selector Cards */}
+            <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+              <div className="label-with-hint">
+                <label>Tier 1 Decision Engine Mode</label>
+                <span className="hint-text">
+                  Select calibrated System 1 logprob decision engine or legacy keyword fallback
+                </span>
+              </div>
+              <div className="policy-cards">
+                <div
+                  className={`policy-card ${
+                    (config?.triage_mode || 'DECISION_FRAMEWORK') === 'DECISION_FRAMEWORK'
+                      ? 'selected-fail-safe'
+                      : ''
+                  }`}
+                  onClick={() =>
+                    setConfig((prev) => ({ ...prev, triage_mode: 'DECISION_FRAMEWORK' }))
+                  }
+                >
+                  <div className="policy-card-header">
+                    <span className="policy-title">
+                      DECISION_FRAMEWORK (Recommended &bull; System 1 Logprobs)
+                    </span>
+                    <div className="target-radio-indicator">
+                      <div
+                        className="radio-inner"
+                        style={{
+                          opacity:
+                            (config?.triage_mode || 'DECISION_FRAMEWORK') === 'DECISION_FRAMEWORK'
+                              ? 1
+                              : 0,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <p className="policy-desc">
+                    Constrained 1-token decoding with softmax calibration over vLLM top_logprobs,
+                    Shannon entropy awareness, and 3-band temporal corroboration.
+                  </p>
+                </div>
+
+                <div
+                  className={`policy-card ${
+                    config?.triage_mode === 'KEYWORD_LEGACY' ? 'selected-conservative' : ''
+                  }`}
+                  onClick={() =>
+                    setConfig((prev) => ({ ...prev, triage_mode: 'KEYWORD_LEGACY' }))
+                  }
+                >
+                  <div className="policy-card-header">
+                    <span className="policy-title">KEYWORD_LEGACY (Negation-Safe Text)</span>
+                    <div className="target-radio-indicator">
+                      <div
+                        className="radio-inner"
+                        style={{
+                          opacity: config?.triage_mode === 'KEYWORD_LEGACY' ? 1 : 0,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <p className="policy-desc">
+                    Evaluates free-form model responses against clause-scoped alert and benign
+                    keyword taxonomies using fixed confidence buckets.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <div className="form-group">
               <div className="label-with-hint">
-                <label htmlFor="gemma-triage-prompt">Triage Prompt (Safe vs. Alert Verdict)</label>
-                <span className="hint-text">Passed directly to Gemma 4 for binary classification</span>
+                <label htmlFor="gemma-triage-prompt">Triage Policy Criteria Prompt</label>
+                <span className="hint-text">
+                  Campus threat policy evaluated by Gemma 4 on every motion candidate
+                </span>
               </div>
               <textarea
                 id="gemma-triage-prompt"
@@ -497,38 +595,154 @@ export default function AdminView() {
               borderTop: '1px solid rgba(255, 255, 255, 0.08)',
             }}
           >
-            <div className="label-with-hint">
-              <label htmlFor="gemma-threshold">Alert & Escalation Confidence Threshold</label>
-              <span className="hint-text">
-                Confidence cutoff score (0.10 to 0.95) required to escalate (Tier 1) and dispatch alerts (Tier 2)
-              </span>
-            </div>
-            <div className="threshold-control-row">
-              <input
-                id="gemma-threshold"
-                type="range"
-                min="0.10"
-                max="0.95"
-                step="0.05"
-                className="threshold-slider"
-                value={config?.gemma_triage_threshold || 0.5}
-                onChange={(e) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    gemma_triage_threshold: parseFloat(e.target.value),
-                  }))
-                }
-              />
-              <div className="threshold-value-badge">
-                {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
+            <div className="admin-grid-2col">
+              <div>
+                <div className="label-with-hint">
+                  <label htmlFor="suppress-threshold">
+                    Band 0 Suppress Ceiling: P(threat) &lt;{' '}
+                    {(config?.suppress_threshold ?? 0.25).toFixed(2)}
+                  </label>
+                  <span className="hint-text">
+                    Frames below ceiling drop immediately at zero API cost
+                  </span>
+                </div>
+                <div className="threshold-control-row">
+                  <input
+                    id="suppress-threshold"
+                    type="range"
+                    min="0.05"
+                    max="0.80"
+                    step="0.05"
+                    className="threshold-slider"
+                    value={config?.suppress_threshold ?? 0.25}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        suppress_threshold: parseFloat(e.target.value),
+                      }))
+                    }
+                  />
+                  <div className="threshold-value-badge">
+                    {(config?.suppress_threshold ?? 0.25).toFixed(2)}
+                  </div>
+                </div>
               </div>
-              <span className="threshold-level-tag">
-                {config?.gemma_triage_threshold <= 0.35
-                  ? 'Sensitive (High Alert/Escalation Rate)'
-                  : config?.gemma_triage_threshold >= 0.70
-                  ? 'Strict (High-Confidence Alerts Only)'
-                  : 'Balanced Default'}
-              </span>
+
+              <div>
+                <div className="label-with-hint">
+                  <label htmlFor="gemma-threshold">
+                    Band 2 Immediate Escalation: P(threat) &ge;{' '}
+                    {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
+                  </label>
+                  <span className="hint-text">
+                    High-confidence candidates escalate on first frame (Band 1 sits between Band 0 &amp; 2)
+                  </span>
+                </div>
+                <div className="threshold-control-row">
+                  <input
+                    id="gemma-threshold"
+                    type="range"
+                    min="0.10"
+                    max="0.95"
+                    step="0.05"
+                    className="threshold-slider"
+                    value={config?.gemma_triage_threshold ?? 0.5}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        gemma_triage_threshold: parseFloat(e.target.value),
+                      }))
+                    }
+                  />
+                  <div className="threshold-value-badge">
+                    {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Band 1 Temporal Corroboration & Anti-Snowball Cooldown */}
+            <div className="admin-grid-3col" style={{ marginTop: '1.1rem' }}>
+              <div className="form-group">
+                <div className="label-with-hint">
+                  <label htmlFor="corroboration-hits">
+                    Band 1 Corroboration Hits (k = {config?.corroboration_hits ?? 2})
+                  </label>
+                  <span className="hint-text">Required hits within ring buffer window</span>
+                </div>
+                <input
+                  id="corroboration-hits"
+                  type="number"
+                  min="1"
+                  max={config?.corroboration_window ?? 3}
+                  step="1"
+                  className="admin-input mono-font"
+                  value={config?.corroboration_hits ?? 2}
+                  onChange={(e) => {
+                    const nextHits = Math.max(1, parseInt(e.target.value, 10) || 1);
+                    setConfig((prev) => ({
+                      ...prev,
+                      corroboration_hits: nextHits,
+                      corroboration_window: Math.max(prev.corroboration_window ?? 3, nextHits),
+                    }));
+                  }}
+                />
+              </div>
+
+              <div className="form-group">
+                <div className="label-with-hint">
+                  <label htmlFor="corroboration-window">
+                    Corroboration Window (n = {config?.corroboration_window ?? 3} frames)
+                  </label>
+                  <span className="hint-text">O(1) non-blocking ring buffer depth</span>
+                </div>
+                <input
+                  id="corroboration-window"
+                  type="number"
+                  min={config?.corroboration_hits ?? 2}
+                  max="10"
+                  step="1"
+                  className="admin-input mono-font"
+                  value={config?.corroboration_window ?? 3}
+                  onChange={(e) => {
+                    const nextWin = Math.min(
+                      10,
+                      Math.max(config?.corroboration_hits ?? 1, parseInt(e.target.value, 10) || 3)
+                    );
+                    setConfig((prev) => ({
+                      ...prev,
+                      corroboration_window: nextWin,
+                    }));
+                  }}
+                />
+              </div>
+
+              <div className="form-group">
+                <div className="label-with-hint">
+                  <label htmlFor="escalation-cooldown">
+                    Anti-Snowball Cooldown ({(config?.escalation_cooldown_seconds ?? 3.0).toFixed(1)}s)
+                  </label>
+                  <span className="hint-text">Single-flight + non-CRITICAL shed window</span>
+                </div>
+                <input
+                  id="escalation-cooldown"
+                  type="number"
+                  min="0.0"
+                  max="60.0"
+                  step="0.5"
+                  className="admin-input mono-font"
+                  value={config?.escalation_cooldown_seconds ?? 3.0}
+                  onChange={(e) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      escalation_cooldown_seconds: Math.max(
+                        0.0,
+                        parseFloat(e.target.value) || 0.0
+                      ),
+                    }))
+                  }
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -855,6 +1069,97 @@ export default function AdminView() {
             </div>
           </div>
 
+          {/* Decoupled Tier 2 Dispatch Confidence Policy */}
+          <div
+            className="form-group threshold-group"
+            style={{
+              marginTop: '1.25rem',
+              paddingTop: '1.25rem',
+              borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '0.5rem',
+              }}
+            >
+              <div className="label-with-hint" style={{ marginBottom: 0 }}>
+                <label htmlFor="dispatch-threshold">
+                  Tier 2 Alert Dispatch Confidence Cutoff
+                </label>
+                <span className="hint-text">
+                  Decouple sensitive Tier 1 screening from high-precision Tier 2 operator sirens
+                </span>
+              </div>
+              <label
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  fontSize: '0.8rem',
+                  color: 'var(--text-secondary)',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={config?.dispatch_confidence_threshold != null}
+                  onChange={(e) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      dispatch_confidence_threshold: e.target.checked
+                        ? prev.gemma_triage_threshold ?? 0.65
+                        : null,
+                    }))
+                  }
+                />
+                <span>Use Independent Tier 2 Cutoff</span>
+              </label>
+            </div>
+
+            {config?.dispatch_confidence_threshold != null ? (
+              <div className="threshold-control-row">
+                <input
+                  id="dispatch-threshold"
+                  type="range"
+                  min="0.10"
+                  max="0.95"
+                  step="0.05"
+                  className="threshold-slider"
+                  value={config.dispatch_confidence_threshold}
+                  onChange={(e) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      dispatch_confidence_threshold: parseFloat(e.target.value),
+                    }))
+                  }
+                />
+                <div className="threshold-value-badge">
+                  {config.dispatch_confidence_threshold.toFixed(2)}
+                </div>
+                <span className="threshold-level-tag">
+                  Independent Tier 2 Policy Cutoff
+                </span>
+              </div>
+            ) : (
+              <div
+                style={{
+                  fontSize: '0.8rem',
+                  color: 'var(--text-muted)',
+                  padding: '0.45rem 0.75rem',
+                  borderRadius: '6px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                }}
+              >
+                Inheriting Tier 1 Band 2 Escalation Cutoff (
+                <strong>{(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}</strong>)
+              </div>
+            )}
+          </div>
+
           {/* Dynamic Prompt Editor based on selection */}
           <div className="prompt-editor-group">
             {config?.escalation_target === 'GEMINI' ? (
@@ -1037,7 +1342,7 @@ export default function AdminView() {
         </div>
 
         <p className="section-description">
-          Review live raw outputs from frontline Gemma 4 triage and escalated Gemini / Gemma deep reasoning.
+          Review live raw outputs, routing actions, and dispatch policy decisions from frontline Gemma 4 triage and escalated Gemini / Gemma deep reasoning.
         </p>
 
         {recentResponses.length === 0 ? (
@@ -1055,6 +1360,7 @@ export default function AdminView() {
                   <th>Drone ID</th>
                   <th>Pipeline Tier</th>
                   <th>Model Engine</th>
+                  <th>Decision Action</th>
                   <th>Threat / Verdict</th>
                   <th>Latency</th>
                   <th>Scene Summary</th>
@@ -1065,6 +1371,10 @@ export default function AdminView() {
                 {recentResponses.map((item, idx) => {
                   const isEscalation = item.source_tier === 'escalation';
                   const isGemini = item.source_model === 'gemini';
+                  const decisionLabel =
+                    item.dispatch_action && item.dispatch_action !== 'CLEAR_ROUTINE'
+                      ? `${item.routing_action || 'TIER2'} → ${item.dispatch_action}`
+                      : item.routing_action || item.dispatch_action || '-';
                   return (
                     <tr key={item.event_id || idx}>
                       <td style={{ whiteSpace: 'nowrap' }}>
@@ -1089,6 +1399,9 @@ export default function AdminView() {
                         </span>
                       </td>
                       <td>{item.model_name || (isGemini ? 'Gemini Flash' : 'Gemma 4')}</td>
+                      <td style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono, monospace)' }}>
+                        {decisionLabel}
+                      </td>
                       <td>
                         <span
                           style={{
@@ -1105,7 +1418,7 @@ export default function AdminView() {
                       <td>{item.latency_ms != null ? `${Math.round(item.latency_ms)}ms` : '-'}</td>
                       <td
                         style={{
-                          maxWidth: '280px',
+                          maxWidth: '240px',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
@@ -1191,6 +1504,18 @@ export default function AdminView() {
                   {selectedResponse.confidence_score != null
                     ? `${(selectedResponse.confidence_score * 100).toFixed(1)}%`
                     : 'N/A'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Routing Action:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.routing_action || 'N/A'}
+                </span>
+              </div>
+              <div className="raw-meta-item">
+                <span className="raw-meta-label">Dispatch Action:</span>
+                <span className="raw-meta-val">
+                  {selectedResponse.dispatch_action || 'N/A'}
                 </span>
               </div>
               <div className="raw-meta-item">

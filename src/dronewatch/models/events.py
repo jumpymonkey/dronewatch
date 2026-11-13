@@ -152,6 +152,14 @@ class IncidentEvent(BaseModel):
         default=None,
         description="Inference and round-trip latency in milliseconds",
     )
+    routing_action: str | None = Field(
+        default=None,
+        description="DecisionEngine Tier 1 routing action (e.g. ESCALATE_IMMEDIATE)",
+    )
+    dispatch_action: str | None = Field(
+        default=None,
+        description="DecisionEngine Tier 2 dispatch action (e.g. ACTIVE_ALERT)",
+    )
 
 
 class DroneStreamConfig(BaseModel):

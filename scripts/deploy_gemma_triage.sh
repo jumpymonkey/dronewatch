@@ -26,11 +26,14 @@ gcloud services enable \
     artifactregistry.googleapis.com \
     --project="${PROJECT_ID}"
 
-# 2. Deploy service to Cloud Run with NVIDIA RTX Pro 6000 GPU
+# 2. Deploy service to Cloud Run with NVIDIA RTX Pro 6000 GPU (default for ~20ms System 1 decode)
 MODELS_BUCKET="${GCS_MODELS_BUCKET:-jal-dronewatch-models}"
-LOCAL_MODEL_PATH="/models/gemma-4-E2B-it"
+LOCAL_MODEL_PATH="${LOCAL_MODEL_PATH:-/models/gemma-4-E2B-it}"
+GPU_TYPE="${GPU_TYPE:-nvidia-rtx-pro-6000}"
+CPU_CORES="${CPU_CORES:-20}"
+MEMORY_GIB="${MEMORY_GIB:-80Gi}"
 
-echo "--> Deploying ${SERVICE_NAME} with NVIDIA RTX Pro 6000 GPU and GCS Volume Mount (${MODELS_BUCKET})..."
+echo "--> Deploying ${SERVICE_NAME} with ${GPU_TYPE} (${CPU_CORES} vCPU / ${MEMORY_GIB}) and GCS Volume Mount (${MODELS_BUCKET})..."
 CONTAINER_ARGS=(
   "serve"
   "${LOCAL_MODEL_PATH}"
@@ -59,10 +62,10 @@ gcloud beta run deploy "${SERVICE_NAME}" \
     --project="${PROJECT_ID}" \
     --execution-environment=gen2 \
     --no-allow-unauthenticated \
-    --cpu=20 \
-    --memory=80Gi \
+    --cpu="${CPU_CORES}" \
+    --memory="${MEMORY_GIB}" \
     --gpu=1 \
-    --gpu-type=nvidia-rtx-pro-6000 \
+    --gpu-type="${GPU_TYPE}" \
     --no-gpu-zonal-redundancy \
     --no-cpu-throttling \
     --min-instances=0 \

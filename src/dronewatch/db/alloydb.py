@@ -16,6 +16,7 @@ from dronewatch.models.workflow_config import (
     DEFAULT_GEMMA_ESCALATION_PROMPT,
     AmbiguityPolicy,
     EscalationTarget,
+    TriageMode,
     WorkflowConfig,
 )
 
@@ -92,7 +93,9 @@ class AlloyDBManager:
                     model_name VARCHAR(64),
                     scene_summary TEXT,
                     raw_response TEXT,
-                    latency_ms DOUBLE PRECISION
+                    latency_ms DOUBLE PRECISION,
+                    routing_action VARCHAR(48),
+                    dispatch_action VARCHAR(48)
                 );
                 ALTER TABLE incident_events
                     ADD COLUMN IF NOT EXISTS source_tier VARCHAR(32) DEFAULT 'triage';
@@ -102,14 +105,22 @@ class AlloyDBManager:
                 ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS scene_summary TEXT;
                 ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS raw_response TEXT;
                 ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS latency_ms DOUBLE PRECISION;
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS routing_action VARCHAR(48);
+                ALTER TABLE incident_events ADD COLUMN IF NOT EXISTS dispatch_action VARCHAR(48);
                 CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incident_events(timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_incidents_threat ON incident_events(threat_level);
 
                 CREATE TABLE IF NOT EXISTS workflow_settings (
                     config_id VARCHAR(32) PRIMARY KEY DEFAULT 'active',
                     enable_tier1_gemma BOOLEAN NOT NULL DEFAULT TRUE,
+                    triage_mode VARCHAR(32) NOT NULL DEFAULT 'DECISION_FRAMEWORK',
                     gemma_triage_prompt TEXT NOT NULL,
+                    suppress_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.25,
                     gemma_triage_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.50,
+                    dispatch_confidence_threshold DOUBLE PRECISION,
+                    corroboration_hits INT NOT NULL DEFAULT 2,
+                    corroboration_window INT NOT NULL DEFAULT 3,
+                    escalation_cooldown_seconds DOUBLE PRECISION NOT NULL DEFAULT 3.0,
                     escalation_target VARCHAR(16) NOT NULL DEFAULT 'GEMINI',
                     gemini_escalation_prompt TEXT NOT NULL,
                     gemma_escalation_prompt TEXT NOT NULL,
@@ -134,6 +145,15 @@ class AlloyDBManager:
                 );
 
                 ALTER TABLE workflow_settings
+                    ADD COLUMN IF NOT EXISTS triage_mode VARCHAR(32)
+                        NOT NULL DEFAULT 'DECISION_FRAMEWORK',
+                    ADD COLUMN IF NOT EXISTS suppress_threshold DOUBLE PRECISION
+                        NOT NULL DEFAULT 0.25,
+                    ADD COLUMN IF NOT EXISTS dispatch_confidence_threshold DOUBLE PRECISION,
+                    ADD COLUMN IF NOT EXISTS corroboration_hits INT NOT NULL DEFAULT 2,
+                    ADD COLUMN IF NOT EXISTS corroboration_window INT NOT NULL DEFAULT 3,
+                    ADD COLUMN IF NOT EXISTS escalation_cooldown_seconds DOUBLE PRECISION
+                        NOT NULL DEFAULT 3.0,
                     ADD COLUMN IF NOT EXISTS gemma_service_url TEXT,
                     ADD COLUMN IF NOT EXISTS gemma_timeout_seconds DOUBLE PRECISION
                         NOT NULL DEFAULT 2.0,
@@ -148,8 +168,14 @@ class AlloyDBManager:
                     history_id BIGSERIAL PRIMARY KEY,
                     version INT NOT NULL,
                     enable_tier1_gemma BOOLEAN NOT NULL,
+                    triage_mode VARCHAR(32) NOT NULL DEFAULT 'DECISION_FRAMEWORK',
                     gemma_triage_prompt TEXT NOT NULL,
+                    suppress_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.25,
                     gemma_triage_threshold DOUBLE PRECISION NOT NULL,
+                    dispatch_confidence_threshold DOUBLE PRECISION,
+                    corroboration_hits INT NOT NULL DEFAULT 2,
+                    corroboration_window INT NOT NULL DEFAULT 3,
+                    escalation_cooldown_seconds DOUBLE PRECISION NOT NULL DEFAULT 3.0,
                     escalation_target VARCHAR(16) NOT NULL,
                     gemini_escalation_prompt TEXT NOT NULL,
                     gemma_escalation_prompt TEXT NOT NULL,
@@ -167,6 +193,15 @@ class AlloyDBManager:
                 );
 
                 ALTER TABLE workflow_settings_history
+                    ADD COLUMN IF NOT EXISTS triage_mode VARCHAR(32)
+                        NOT NULL DEFAULT 'DECISION_FRAMEWORK',
+                    ADD COLUMN IF NOT EXISTS suppress_threshold DOUBLE PRECISION
+                        NOT NULL DEFAULT 0.25,
+                    ADD COLUMN IF NOT EXISTS dispatch_confidence_threshold DOUBLE PRECISION,
+                    ADD COLUMN IF NOT EXISTS corroboration_hits INT NOT NULL DEFAULT 2,
+                    ADD COLUMN IF NOT EXISTS corroboration_window INT NOT NULL DEFAULT 3,
+                    ADD COLUMN IF NOT EXISTS escalation_cooldown_seconds DOUBLE PRECISION
+                        NOT NULL DEFAULT 3.0,
                     ADD COLUMN IF NOT EXISTS gemma_service_url TEXT,
                     ADD COLUMN IF NOT EXISTS gemma_timeout_seconds DOUBLE PRECISION
                         NOT NULL DEFAULT 2.0,
@@ -187,22 +222,29 @@ class AlloyDBManager:
                 await conn.execute(
                     """
                     INSERT INTO workflow_settings (
-                        config_id, enable_tier1_gemma, gemma_triage_prompt,
-                        gemma_triage_threshold, escalation_target,
-                        gemini_escalation_prompt, gemma_escalation_prompt,
+                        config_id, enable_tier1_gemma, triage_mode, gemma_triage_prompt,
+                        suppress_threshold, gemma_triage_threshold, dispatch_confidence_threshold,
+                        corroboration_hits, corroboration_window, escalation_cooldown_seconds,
+                        escalation_target, gemini_escalation_prompt, gemma_escalation_prompt,
                         gemini_model, gemma_model, gemma_service_url,
                         gemma_timeout_seconds, alert_keywords, benign_keywords,
                         ambiguity_policy, vllm_temperature, vllm_max_tokens,
                         updated_at, updated_by, version
                     ) VALUES (
                         'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        $11, $12, $13, $14, $15, $16, $17, $18
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
                     )
                     ON CONFLICT (config_id) DO NOTHING
                     """,
                     default_config.enable_tier1_gemma,
+                    str(default_config.triage_mode),
                     default_config.gemma_triage_prompt,
+                    default_config.suppress_threshold,
                     default_config.gemma_triage_threshold,
+                    default_config.dispatch_confidence_threshold,
+                    default_config.corroboration_hits,
+                    default_config.corroboration_window,
+                    default_config.escalation_cooldown_seconds,
                     str(default_config.escalation_target),
                     default_config.gemini_escalation_prompt,
                     default_config.gemma_escalation_prompt,
@@ -259,10 +301,10 @@ class AlloyDBManager:
                             bounding_boxes, snapshot_uri, video_timestamp_seconds,
                             video_timestamp_formatted, acknowledged_by_pilot, description_vector,
                             source_tier, source_model, model_name, scene_summary,
-                            raw_response, latency_ms
+                            raw_response, latency_ms, routing_action, dispatch_action
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                            $17, $18, $19, $20, $21, $22
+                            $17, $18, $19, $20, $21, $22, $23, $24
                         )
                         """,
                         event.event_id,
@@ -287,6 +329,8 @@ class AlloyDBManager:
                         event.scene_summary,
                         event.raw_response,
                         event.latency_ms,
+                        event.routing_action,
+                        event.dispatch_action,
                     )
                 logger.info("Logged incident %s to AlloyDB.", event.event_id)
                 return
@@ -321,7 +365,7 @@ class AlloyDBManager:
                                    bounding_boxes, snapshot_uri, video_timestamp_seconds,
                                    video_timestamp_formatted, acknowledged_by_pilot,
                                    source_tier, source_model, model_name, scene_summary,
-                                   raw_response, latency_ms
+                                   raw_response, latency_ms, routing_action, dispatch_action
                             FROM incident_events
                             WHERE threat_level = $1
                             ORDER BY timestamp DESC
@@ -338,7 +382,7 @@ class AlloyDBManager:
                                    bounding_boxes, snapshot_uri, video_timestamp_seconds,
                                    video_timestamp_formatted, acknowledged_by_pilot,
                                    source_tier, source_model, model_name, scene_summary,
-                                   raw_response, latency_ms
+                                   raw_response, latency_ms, routing_action, dispatch_action
                             FROM incident_events
                             ORDER BY timestamp DESC
                             LIMIT $1
@@ -372,6 +416,8 @@ class AlloyDBManager:
                                 scene_summary=r["scene_summary"],
                                 raw_response=r["raw_response"],
                                 latency_ms=r["latency_ms"],
+                                routing_action=r["routing_action"],
+                                dispatch_action=r["dispatch_action"],
                             )
                         )
                     return events
@@ -415,8 +461,14 @@ class AlloyDBManager:
         """Generate default workflow configuration from application settings."""
         return WorkflowConfig(
             enable_tier1_gemma=self.settings.enable_tier1_gemma,
+            triage_mode=TriageMode(self.settings.triage_mode),
             gemma_triage_prompt=self.settings.gemma_triage_prompt,
+            suppress_threshold=self.settings.suppress_threshold,
             gemma_triage_threshold=self.settings.gemma_triage_threshold,
+            dispatch_confidence_threshold=None,
+            corroboration_hits=self.settings.corroboration_hits,
+            corroboration_window=self.settings.corroboration_window,
+            escalation_cooldown_seconds=self.settings.escalation_cooldown_seconds,
             escalation_target=EscalationTarget.GEMINI,
             gemini_model=self.settings.gemini_model,
             gemma_model=self.settings.gemma_model_name,
@@ -436,7 +488,10 @@ class AlloyDBManager:
                 async with self._pool.acquire() as conn:
                     row = await conn.fetchrow(
                         """
-                        SELECT enable_tier1_gemma, gemma_triage_prompt, gemma_triage_threshold,
+                        SELECT enable_tier1_gemma, triage_mode, gemma_triage_prompt,
+                               suppress_threshold, gemma_triage_threshold,
+                               dispatch_confidence_threshold, corroboration_hits,
+                               corroboration_window, escalation_cooldown_seconds,
                                escalation_target, gemini_escalation_prompt, gemma_escalation_prompt,
                                gemini_model, gemma_model, gemma_service_url, gemma_timeout_seconds,
                                alert_keywords, benign_keywords, ambiguity_policy,
@@ -458,8 +513,24 @@ class AlloyDBManager:
 
                         return WorkflowConfig(
                             enable_tier1_gemma=row["enable_tier1_gemma"],
+                            triage_mode=TriageMode(
+                                row["triage_mode"] or TriageMode.DECISION_FRAMEWORK
+                            ),
                             gemma_triage_prompt=row["gemma_triage_prompt"],
+                            suppress_threshold=row["suppress_threshold"]
+                            if row["suppress_threshold"] is not None
+                            else 0.25,
                             gemma_triage_threshold=row["gemma_triage_threshold"],
+                            dispatch_confidence_threshold=row["dispatch_confidence_threshold"],
+                            corroboration_hits=row["corroboration_hits"]
+                            if row["corroboration_hits"] is not None
+                            else 2,
+                            corroboration_window=row["corroboration_window"]
+                            if row["corroboration_window"] is not None
+                            else 3,
+                            escalation_cooldown_seconds=row["escalation_cooldown_seconds"]
+                            if row["escalation_cooldown_seconds"] is not None
+                            else 3.0,
                             escalation_target=EscalationTarget(row["escalation_target"]),
                             gemini_escalation_prompt=row["gemini_escalation_prompt"],
                             gemma_escalation_prompt=row["gemma_escalation_prompt"],
@@ -505,21 +576,31 @@ class AlloyDBManager:
                         await conn.execute(
                             """
                             INSERT INTO workflow_settings (
-                                config_id, enable_tier1_gemma, gemma_triage_prompt,
-                                gemma_triage_threshold, escalation_target,
-                                gemini_escalation_prompt, gemma_escalation_prompt,
-                                gemini_model, gemma_model, gemma_service_url,
-                                gemma_timeout_seconds, alert_keywords, benign_keywords,
+                                config_id, enable_tier1_gemma, triage_mode, gemma_triage_prompt,
+                                suppress_threshold, gemma_triage_threshold,
+                                dispatch_confidence_threshold, corroboration_hits,
+                                corroboration_window, escalation_cooldown_seconds,
+                                escalation_target, gemini_escalation_prompt,
+                                gemma_escalation_prompt, gemini_model, gemma_model,
+                                gemma_service_url, gemma_timeout_seconds,
+                                alert_keywords, benign_keywords,
                                 ambiguity_policy, vllm_temperature, vllm_max_tokens,
                                 updated_at, updated_by, version
                             ) VALUES (
                                 'active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                                $11, $12, $13, $14, $15, $16, $17, $18
+                                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
                             )
                             ON CONFLICT (config_id) DO UPDATE SET
                                 enable_tier1_gemma = EXCLUDED.enable_tier1_gemma,
+                                triage_mode = EXCLUDED.triage_mode,
                                 gemma_triage_prompt = EXCLUDED.gemma_triage_prompt,
+                                suppress_threshold = EXCLUDED.suppress_threshold,
                                 gemma_triage_threshold = EXCLUDED.gemma_triage_threshold,
+                                dispatch_confidence_threshold =
+                                    EXCLUDED.dispatch_confidence_threshold,
+                                corroboration_hits = EXCLUDED.corroboration_hits,
+                                corroboration_window = EXCLUDED.corroboration_window,
+                                escalation_cooldown_seconds = EXCLUDED.escalation_cooldown_seconds,
                                 escalation_target = EXCLUDED.escalation_target,
                                 gemini_escalation_prompt = EXCLUDED.gemini_escalation_prompt,
                                 gemma_escalation_prompt = EXCLUDED.gemma_escalation_prompt,
@@ -537,8 +618,14 @@ class AlloyDBManager:
                                 version = EXCLUDED.version
                             """,
                             config.enable_tier1_gemma,
+                            str(config.triage_mode),
                             config.gemma_triage_prompt,
+                            config.suppress_threshold,
                             config.gemma_triage_threshold,
+                            config.dispatch_confidence_threshold,
+                            config.corroboration_hits,
+                            config.corroboration_window,
+                            config.escalation_cooldown_seconds,
                             str(config.escalation_target),
                             config.gemini_escalation_prompt,
                             config.gemma_escalation_prompt,
@@ -558,22 +645,31 @@ class AlloyDBManager:
                         await conn.execute(
                             """
                             INSERT INTO workflow_settings_history (
-                                version, enable_tier1_gemma, gemma_triage_prompt,
-                                gemma_triage_threshold, escalation_target,
-                                gemini_escalation_prompt, gemma_escalation_prompt,
-                                gemini_model, gemma_model, gemma_service_url,
-                                gemma_timeout_seconds, alert_keywords, benign_keywords,
+                                version, enable_tier1_gemma, triage_mode, gemma_triage_prompt,
+                                suppress_threshold, gemma_triage_threshold,
+                                dispatch_confidence_threshold, corroboration_hits,
+                                corroboration_window, escalation_cooldown_seconds,
+                                escalation_target, gemini_escalation_prompt,
+                                gemma_escalation_prompt, gemini_model, gemma_model,
+                                gemma_service_url, gemma_timeout_seconds,
+                                alert_keywords, benign_keywords,
                                 ambiguity_policy, vllm_temperature, vllm_max_tokens,
                                 changed_at, changed_by
                             ) VALUES (
                                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                                $11, $12, $13, $14, $15, $16, $17, $18
+                                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
                             )
                             """,
                             config.version,
                             config.enable_tier1_gemma,
+                            str(config.triage_mode),
                             config.gemma_triage_prompt,
+                            config.suppress_threshold,
                             config.gemma_triage_threshold,
+                            config.dispatch_confidence_threshold,
+                            config.corroboration_hits,
+                            config.corroboration_window,
+                            config.escalation_cooldown_seconds,
                             str(config.escalation_target),
                             config.gemini_escalation_prompt,
                             config.gemma_escalation_prompt,

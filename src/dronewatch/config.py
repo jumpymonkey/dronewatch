@@ -38,10 +38,14 @@ class Settings(BaseSettings):
         description="Gemini model version for video analysis",
     )
 
-    # Tier 1 Gemma Triage Settings (Option A: vLLM on Cloud Run GPU)
+    # Tier 1 Gemma Triage & System 1 Decision Framework Settings
     enable_tier1_gemma: bool = Field(
         default=False,
         description="Enable Tier 1 Gemma vision triage before escalating to Gemini",
+    )
+    triage_mode: str = Field(
+        default="DECISION_FRAMEWORK",
+        description="Tier 1 evaluation mode: DECISION_FRAMEWORK or KEYWORD_LEGACY",
     )
     gemma_service_url: str = Field(
         default="",
@@ -51,11 +55,35 @@ class Settings(BaseSettings):
         default="google/gemma-4-E2B-it",
         description="Target model identifier served by vLLM",
     )
+    suppress_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Band 0 ceiling below which frames are immediately suppressed",
+    )
     gemma_triage_threshold: float = Field(
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="Confidence threshold above which frames are escalated to Tier 2 Gemini",
+        description="Band 2 cutoff at or above which frames immediately escalate to Tier 2",
+    )
+    corroboration_hits: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Required Band 1 hits within corroboration_window to escalate",
+    )
+    corroboration_window: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Sliding window size for Band 1 non-blocking temporal corroboration",
+    )
+    escalation_cooldown_seconds: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=60.0,
+        description="Anti-snowball cooldown in seconds between non-CRITICAL Tier 2 escalations",
     )
     gemma_timeout_seconds: float = Field(
         default=2.0,

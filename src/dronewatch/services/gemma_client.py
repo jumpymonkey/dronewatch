@@ -1,8 +1,9 @@
-"""Tier 1 Gemma 4 vision triage client for Google Cloud Run (Option A: vLLM)."""
+"""Tier 1 Gemma 4 System 1 decision triage client for Google Cloud Run (vLLM)."""
 
 import base64
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -18,18 +19,56 @@ from dronewatch.models.events import (
     IncidentCategory,
     ThreatLevel,
 )
-from dronewatch.models.triage import GemmaTriageResponse
+from dronewatch.models.triage import (
+    GemmaTriageResponse,
+    TriageClassProbabilities,
+    TriageVerdict,
+)
 from dronewatch.models.workflow_config import (
     DEFAULT_ALERT_KEYWORDS,
     DEFAULT_BENIGN_KEYWORDS,
+    DEFAULT_GEMMA_TRIAGE_PROMPT,
+    DEFAULT_SYSTEM1_DECISION_PROMPT,
     AmbiguityPolicy,
+    TriageMode,
 )
 
 logger = logging.getLogger(__name__)
 
 # Default keywords for backward compatibility with external imports
-ALERT_KEYWORDS: frozenset[str] = DEFAULT_ALERT_KEYWORDS
-BENIGN_KEYWORDS: frozenset[str] = DEFAULT_BENIGN_KEYWORDS
+ALERT_KEYWORDS: frozenset[str] = frozenset(DEFAULT_ALERT_KEYWORDS)
+BENIGN_KEYWORDS: frozenset[str] = frozenset(DEFAULT_BENIGN_KEYWORDS)
+
+# Canonical token prefix buckets for System 1 logprob softmax calibration
+_SAFE_TOKEN_PREFIXES: tuple[str, ...] = ("safe", "clear", "benign", "normal", "routine")
+_SUSPICIOUS_TOKEN_PREFIXES: tuple[str, ...] = (
+    "suspicious",
+    "caution",
+    "ambiguous",
+    "warning",
+    "anomaly",
+    "anomalous",
+)
+_CRITICAL_TOKEN_PREFIXES: tuple[str, ...] = (
+    "critical",
+    "alert",
+    "danger",
+    "breach",
+    "intruder",
+    "hazard",
+    "threat",
+)
+_FLOOR_LOGPROB: float = -14.0
+
+
+def _logsumexp_pair(a: float, b: float) -> float:
+    """Compute log(exp(a) + exp(b)) safely without overflow."""
+    if a == -math.inf:
+        return b
+    if b == -math.inf:
+        return a
+    hi = max(a, b)
+    return hi + math.log1p(math.exp(min(a, b) - hi))
 
 
 class GemmaTriageClient:
@@ -64,8 +103,9 @@ class GemmaTriageClient:
         self._cached_audience: str = ""
         self._token_expiry_timestamp: float = 0.0
 
-        # Circuit breaker state
+        # Circuit breaker state and guided_choice capability flag
         self._circuit_tripped: bool = False
+        self._supports_guided_choice: bool = True
 
     @staticmethod
     def _resolve_endpoint_and_audience(service_url: str) -> tuple[str, str]:
@@ -118,7 +158,6 @@ class GemmaTriageClient:
                 return None
 
         # 2. Local development fallback: try gcloud auth print-identity-token
-        # without metadata timeout
         try:
             import shutil
             import subprocess
@@ -139,6 +178,162 @@ class GemmaTriageClient:
 
         return None
 
+    @staticmethod
+    def _classify_token_bucket(raw_token: str) -> TriageVerdict | None:
+        """Map a subword or word token from vLLM top_logprobs into a System 1 Choice class."""
+        norm = re.sub(r"[^a-z]", "", raw_token.lower())
+        if not norm:
+            return None
+        if any(
+            norm.startswith(p) or p.startswith(norm) for p in _SAFE_TOKEN_PREFIXES if len(norm) >= 2
+        ):
+            return TriageVerdict.SAFE
+        if any(
+            norm.startswith(p) or p.startswith(norm)
+            for p in _SUSPICIOUS_TOKEN_PREFIXES
+            if len(norm) >= 3
+        ):
+            return TriageVerdict.SUSPICIOUS
+        if any(
+            norm.startswith(p) or p.startswith(norm)
+            for p in _CRITICAL_TOKEN_PREFIXES
+            if len(norm) >= 3
+        ):
+            return TriageVerdict.CRITICAL
+        return None
+
+    @classmethod
+    def _extract_logprob_calibration(
+        cls,
+        choice_obj: dict[str, Any],
+    ) -> tuple[TriageVerdict, float, TriageClassProbabilities] | None:
+        """Extract calibrated System 1 Choice probabilities via softmax over vLLM logprobs.
+
+        Scans returned token positions (reverse-first for terminal verdicts in heartbeats,
+        forward for single-word guided choices) and normalizes top_logprobs across
+        (SAFE, SUSPICIOUS, CRITICAL) alongside normalized Shannon entropy.
+        """
+        logprobs_root = choice_obj.get("logprobs")
+        if not isinstance(logprobs_root, dict):
+            return None
+
+        content_tokens = logprobs_root.get("content")
+        if not isinstance(content_tokens, list) or not content_tokens:
+            return None
+
+        # Prefer first token if single-token choice, or terminal verdict token on heartbeats
+        candidate_positions = (
+            content_tokens if len(content_tokens) <= 2 else list(reversed(content_tokens))
+        )
+
+        for tok_entry in candidate_positions:
+            if not isinstance(tok_entry, dict):
+                continue
+            primary_tok = str(tok_entry.get("token", ""))
+            primary_bucket = cls._classify_token_bucket(primary_tok)
+            top_list = tok_entry.get("top_logprobs")
+            if primary_bucket is None and not isinstance(top_list, list):
+                continue
+
+            bucket_logprobs: dict[TriageVerdict, float] = {
+                TriageVerdict.SAFE: -math.inf,
+                TriageVerdict.SUSPICIOUS: -math.inf,
+                TriageVerdict.CRITICAL: -math.inf,
+            }
+
+            matched_any = False
+            if isinstance(top_list, list) and top_list:
+                for cand in top_list:
+                    if not isinstance(cand, dict):
+                        continue
+                    cand_tok = str(cand.get("token", ""))
+                    cand_lp_raw = cand.get("logprob")
+                    if cand_lp_raw is None:
+                        continue
+                    try:
+                        cand_lp = float(cand_lp_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    b = cls._classify_token_bucket(cand_tok)
+                    if b is not None:
+                        bucket_logprobs[b] = _logsumexp_pair(bucket_logprobs[b], cand_lp)
+                        matched_any = True
+
+            if primary_bucket is not None and bucket_logprobs[primary_bucket] == -math.inf:
+                raw_lp = tok_entry.get("logprob")
+                if raw_lp is not None:
+                    try:
+                        bucket_logprobs[primary_bucket] = float(raw_lp)
+                        matched_any = True
+                    except (TypeError, ValueError):
+                        pass
+
+            if not matched_any:
+                continue
+
+            # Apply floor logprob to unobserved classes for smooth calibrated distribution
+            for k in bucket_logprobs:
+                if bucket_logprobs[k] == -math.inf:
+                    bucket_logprobs[k] = _FLOOR_LOGPROB
+
+            max_lp = max(bucket_logprobs.values())
+            exps = {k: math.exp(lp - max_lp) for k, lp in bucket_logprobs.items()}
+            total_exp = sum(exps.values())
+            probs = {k: exps[k] / total_exp for k in bucket_logprobs}
+
+            p_safe = round(probs[TriageVerdict.SAFE], 4)
+            p_susp = round(probs[TriageVerdict.SUSPICIOUS], 4)
+            p_crit = round(max(0.0, 1.0 - p_safe - p_susp), 4)
+            p_threat = round(min(1.0, max(0.0, 1.0 - p_safe)), 4)
+
+            # Normalized Shannon entropy H / ln(3) in [0, 1]
+            raw_entropy = -sum(
+                p * math.log(max(p, 1e-12)) for p in (p_safe, p_susp, p_crit) if p > 0.0
+            )
+            norm_entropy = round(min(1.0, max(0.0, raw_entropy / math.log(3.0))), 4)
+
+            if p_crit >= max(p_safe, p_susp) or p_crit >= 0.45:
+                verdict = TriageVerdict.CRITICAL
+            elif p_susp >= p_safe or p_threat >= 0.25:
+                verdict = TriageVerdict.SUSPICIOUS
+            else:
+                verdict = TriageVerdict.SAFE
+
+            return (
+                verdict,
+                p_threat,
+                TriageClassProbabilities(
+                    safe=p_safe,
+                    suspicious=p_susp,
+                    critical=p_crit,
+                    entropy=norm_entropy,
+                    calibrated_from_logprobs=True,
+                ),
+            )
+
+        return None
+
+    @staticmethod
+    def _strip_negated_clauses(lower_text: str, alert_terms: list[str]) -> str:
+        """Remove negated threat clauses while preserving contrastive ('but/however') alerts."""
+        if not alert_terms:
+            return lower_text
+        # Split on sentence and contrastive boundaries so negation never leaks across 'but'
+        segments = re.split(
+            r"([.!?;]|\b(?:but|however|except|yet|although|though|while)\b)",
+            lower_text,
+        )
+        neg_trigger = re.compile(r"\b(?:no|zero|without|not|neither|free\s+of)\b")
+        cleaned_segments: list[str] = []
+        for seg in segments:
+            m = neg_trigger.search(seg)
+            if m is not None:
+                # Keep prefix before negation trigger; strip negated predicate within this clause
+                cleaned_segments.append(seg[: m.start()])
+            else:
+                cleaned_segments.append(seg)
+        return " ".join(cleaned_segments)
+
     def _parse_triage_text(
         self,
         text: str,
@@ -146,18 +341,37 @@ class GemmaTriageClient:
         benign_keywords: list[str] | set[str] | frozenset[str] | None = None,
         ambiguity_policy: AmbiguityPolicy | str | None = None,
     ) -> tuple[bool, float, list[str]]:
-        """Parse raw model output to determine threat classification and score.
+        """Parse raw model output to determine threat classification and fallback score.
 
-        Args:
-            text: Raw generated output string from Gemma 4.
-            alert_keywords: Optional keywords triggering alert score.
-            benign_keywords: Optional keywords indicating benign status.
-            ambiguity_policy: Policy when output is ambiguous (FAIL_SAFE or CONSERVATIVE).
-
-        Returns:
-            Tuple of (is_alert, confidence_score, matching_tags).
+        Handles structured System 1 Choice tokens (SAFE, SUSPICIOUS, CRITICAL), JSON
+        envelopes, and negation-safe keyword matching when logprobs are unavailable.
         """
         cleaned = text.lower().strip()
+
+        # 0. Structured JSON envelope support (e.g. {"verdict": "SAFE", ...})
+        if cleaned.startswith("{") and cleaned.endswith("}"):
+            try:
+                parsed_json = json.loads(text.strip())
+                if isinstance(parsed_json, dict) and "verdict" in parsed_json:
+                    v = str(parsed_json["verdict"]).strip().upper()
+                    if v in ("SAFE", "CLEAR", "BENIGN"):
+                        return False, 0.05, ["safe", "structured_choice"]
+                    if v == "SUSPICIOUS":
+                        return True, 0.50, ["suspicious", "structured_choice"]
+                    if v in ("CRITICAL", "ALERT"):
+                        return True, 0.95, [v.lower(), "structured_choice"]
+            except Exception:
+                pass
+
+        # 1. Exact single-word System 1 Choice fast-path
+        exact_token = re.sub(r"[^a-z]", "", cleaned)
+        if exact_token == "safe":
+            return False, 0.05, ["safe"]
+        if exact_token == "suspicious":
+            return True, 0.50, ["suspicious"]
+        if exact_token == "critical":
+            return True, 0.95, ["critical"]
+
         active_alerts = (
             [kw.lower() for kw in alert_keywords]
             if alert_keywords is not None
@@ -174,15 +388,19 @@ class GemmaTriageClient:
             else AmbiguityPolicy.FAIL_SAFE
         )
 
-        matched_alerts = [kw for kw in active_alerts if kw in cleaned]
+        # Strip negated alert phrases ("no unauthorized persons", "no equipment") before matching
+        unnegated = self._strip_negated_clauses(cleaned, active_alerts)
+
+        matched_alerts = [kw for kw in active_alerts if kw in unnegated]
         matched_benign = [kw for kw in active_benign if kw in cleaned]
 
         terminal_safe = bool(re.search(r"\bsafe[\.!]?$", cleaned))
-        terminal_alert = bool(re.search(r"\balert[\.!]?$", cleaned))
+        terminal_suspicious = bool(re.search(r"\bsuspicious[\.!]?$", cleaned))
+        terminal_alert = bool(re.search(r"\b(?:alert|critical)[\.!]?$", unnegated))
         critical_threats = [
             k
             for k in ("breach", "danger", "intruder", "weapon", "trespass", "climbing")
-            if k in cleaned
+            if k in unnegated
         ]
 
         if terminal_safe and not critical_threats and not matched_alerts:
@@ -190,21 +408,41 @@ class GemmaTriageClient:
             return False, 0.05, benign_tags
 
         if terminal_alert or critical_threats:
-            base_score = 0.95 if critical_threats else 0.85
+            base_score = 0.95 if critical_threats or "critical" in unnegated else 0.85
             tags = matched_alerts if matched_alerts else ["alert"]
             return True, min(1.0, base_score), tags
+
+        if terminal_suspicious:
+            tags = matched_alerts if matched_alerts else ["suspicious"]
+            return True, 0.50, tags
 
         if matched_alerts:
             base_score = 0.85
             return True, base_score, matched_alerts
 
-        if matched_benign:
-            return False, 0.05, matched_benign
+        if matched_benign or cleaned != unnegated:
+            tags = matched_benign if matched_benign else ["negated_threat_safe"]
+            return False, 0.05, tags
 
         # Handling policy when output is ambiguous / unclassified
         if policy == AmbiguityPolicy.FAIL_SAFE:
             return True, 0.80, ["unclassified", "ambiguous_fail_safe"]
         return False, 0.20, ["unclassified", "ambiguous_conservative"]
+
+    @staticmethod
+    def _build_system1_prompt(user_prompt: str | None) -> str:
+        """Build System 1 Choice rubric prompt while honoring custom operator guidance."""
+        if not user_prompt or not user_prompt.strip():
+            return DEFAULT_SYSTEM1_DECISION_PROMPT
+        stripped = user_prompt.strip()
+        if stripped == DEFAULT_GEMMA_TRIAGE_PROMPT:
+            return DEFAULT_SYSTEM1_DECISION_PROMPT
+        if all(lbl in stripped.upper() for lbl in ("SAFE", "SUSPICIOUS", "CRITICAL")):
+            return stripped
+        return (
+            f"{stripped}\n"
+            "Classify into exactly one System 1 verdict: SAFE, SUSPICIOUS, or CRITICAL."
+        )
 
     async def triage_frame(
         self,
@@ -222,31 +460,14 @@ class GemmaTriageClient:
         ambiguity_policy: AmbiguityPolicy | str | None = None,
         vllm_temperature: float | None = None,
         vllm_max_tokens: int | None = None,
+        triage_mode: TriageMode | str | None = None,
     ) -> GemmaTriageResponse:
-        """Submit a single video frame to Tier 1 Gemma 4 for front-line triage.
+        """Submit a single video frame to Tier 1 Gemma 4 for System 1 decision triage.
 
+        In DECISION_FRAMEWORK mode (default), requests vLLM guided_choice + top_logprobs
+        to compute exact softmax-calibrated P(threat) and entropy in a single decode pass.
         Implements fail-open circuit breaker: on timeout or error, returns
         CIRCUIT_BREAKER_BYPASS with escalate_to_gemini=True.
-
-        Args:
-            frame_bytes: JPEG/PNG encoded image bytes.
-            drone_id: Identifier of the drone capturing the frame.
-            timestamp_sec: Optional video position timecode.
-            request_scene_description: If True, prompt Gemma 4 for a concise scene
-                summary and safe/alert verdict (for periodic UI telemetry heartbeat).
-            prompt: Optional dynamic prompt overriding default triage prompt.
-            threshold: Optional dynamic confidence score threshold.
-            gemma_service_url: Optional runtime service URL override.
-            gemma_model: Optional runtime model identifier override.
-            gemma_timeout_seconds: Optional runtime timeout in seconds.
-            alert_keywords: Optional keywords triggering alert score.
-            benign_keywords: Optional keywords indicating benign status.
-            ambiguity_policy: Handling policy for unclassified outputs.
-            vllm_temperature: Optional runtime sampling temperature.
-            vllm_max_tokens: Optional runtime max output tokens.
-
-        Returns:
-            GemmaTriageResponse evaluated against threshold.
         """
         start_time = time.perf_counter()
 
@@ -255,6 +476,11 @@ class GemmaTriageClient:
         target_model = gemma_model or self.model_name
         target_timeout = (
             gemma_timeout_seconds if gemma_timeout_seconds is not None else self.timeout
+        )
+        mode = (
+            TriageMode(triage_mode)
+            if triage_mode is not None
+            else TriageMode(self.settings.triage_mode)
         )
 
         # If service URL is unset, fail open directly to Gemini
@@ -266,6 +492,7 @@ class GemmaTriageClient:
                 triage_score=1.0,
                 tier1_latency_ms=latency_ms,
                 tier1_decision="CIRCUIT_BREAKER_BYPASS",
+                verdict=TriageVerdict.CRITICAL,
                 tags=["service_url_not_configured"],
                 raw_output=None,
                 scene_description=None,
@@ -273,12 +500,15 @@ class GemmaTriageClient:
             )
 
         try:
-            # Encode frame to Base64 data URI
             b64_image = base64.b64encode(frame_bytes).decode("ascii")
+            use_decision_framework = mode == TriageMode.DECISION_FRAMEWORK
 
             if request_scene_description:
                 prompt_text = self.settings.gemma_scene_description_prompt
                 tokens = 64
+            elif use_decision_framework:
+                prompt_text = self._build_system1_prompt(prompt or self.prompt)
+                tokens = min(vllm_max_tokens, 8) if vllm_max_tokens is not None else 4
             elif prompt is not None and prompt.strip():
                 prompt_text = prompt
                 tokens = vllm_max_tokens if vllm_max_tokens is not None else 32
@@ -288,7 +518,6 @@ class GemmaTriageClient:
 
             temp = vllm_temperature if vllm_temperature is not None else 0.0
 
-            # Format OpenAI Vision / vLLM compatible payload (Option A)
             payload: dict[str, Any] = {
                 "model": target_model,
                 "messages": [
@@ -309,12 +538,17 @@ class GemmaTriageClient:
                 "temperature": temp,
             }
 
+            if use_decision_framework:
+                payload["logprobs"] = True
+                payload["top_logprobs"] = 5
+                if not request_scene_description and self._supports_guided_choice:
+                    payload["guided_choice"] = ["SAFE", "SUSPICIOUS", "CRITICAL"]
+
             headers = {
                 "Content-Type": "application/json",
-                "User-Agent": f"DroneWatch-Ingestion/2.0 ({drone_id})",
+                "User-Agent": f"DroneWatch-Ingestion/3.0 ({drone_id})",
             }
 
-            # Inject Google OIDC token if available
             oidc_token = self._get_oidc_token(audience)
             if oidc_token:
                 headers["Authorization"] = f"Bearer {oidc_token}"
@@ -325,6 +559,22 @@ class GemmaTriageClient:
                 headers=headers,
                 timeout=target_timeout,
             )
+
+            # Graceful fallback if serving container rejects guided_choice parameter
+            if response.status_code in (400, 422) and "guided_choice" in payload:
+                logger.info(
+                    "vLLM endpoint rejected guided_choice (HTTP %d); retrying with logprobs only.",
+                    response.status_code,
+                )
+                self._supports_guided_choice = False
+                payload.pop("guided_choice", None)
+                response = await self._client.post(
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=target_timeout,
+                )
+
             response.raise_for_status()
             data = response.json()
 
@@ -336,35 +586,68 @@ class GemmaTriageClient:
 
             latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-            # Extract generated content from choices
             choices = data.get("choices", [])
             raw_content = ""
-            if choices and "message" in choices[0]:
-                raw_content = choices[0]["message"].get("content", "")
+            first_choice: dict[str, Any] = (
+                choices[0] if choices and isinstance(choices[0], dict) else {}
+            )
+            if "message" in first_choice and isinstance(first_choice["message"], dict):
+                raw_content = str(first_choice["message"].get("content", ""))
             elif "output" in data:
                 raw_content = str(data["output"])
 
-            is_alert, score, tags = self._parse_triage_text(
-                raw_content,
-                alert_keywords=alert_keywords,
-                benign_keywords=benign_keywords,
-                ambiguity_policy=ambiguity_policy,
+            calibrated = (
+                self._extract_logprob_calibration(first_choice)
+                if use_decision_framework and first_choice
+                else None
             )
+
+            if calibrated is not None:
+                verdict, score, class_probs = calibrated
+                is_alert = verdict != TriageVerdict.SAFE or score >= (
+                    threshold if threshold is not None else self.threshold
+                )
+                tags = [verdict.value.lower(), "logprob_calibrated"]
+            else:
+                is_alert, score, tags = self._parse_triage_text(
+                    raw_content,
+                    alert_keywords=alert_keywords,
+                    benign_keywords=benign_keywords,
+                    ambiguity_policy=ambiguity_policy,
+                )
+                if score >= 0.80:
+                    verdict = TriageVerdict.CRITICAL
+                elif score >= 0.25 or is_alert:
+                    verdict = TriageVerdict.SUSPICIOUS
+                else:
+                    verdict = TriageVerdict.SAFE
+                class_probs = TriageClassProbabilities(
+                    safe=round(max(0.0, 1.0 - score), 4),
+                    suspicious=round(score if verdict == TriageVerdict.SUSPICIOUS else 0.0, 4),
+                    critical=round(score if verdict == TriageVerdict.CRITICAL else 0.0, 4),
+                    entropy=0.0,
+                    calibrated_from_logprobs=False,
+                )
+
             cutoff = threshold if threshold is not None else self.threshold
             escalate = score >= cutoff
 
             decision: str
-            if not escalate:
+            if not escalate and verdict == TriageVerdict.SAFE:
                 decision = "BENIGN"
-            elif score >= 0.8:
+            elif score >= 0.8 or verdict == TriageVerdict.CRITICAL:
                 decision = "ANOMALOUS"
+            elif not escalate:
+                decision = "BENIGN"
             else:
                 decision = "SUSPICIOUS"
 
             scene_description: str | None = None
             if request_scene_description and raw_content:
                 cleaned_desc = re.sub(
-                    r"[\s\.,;:-]+(?:SAFE|ALERT|safe|alert)\.?$", "", raw_content
+                    r"[\s\.,;:-]+(?:SAFE|ALERT|SUSPICIOUS|CRITICAL|safe|alert|suspicious|critical)\.?$",
+                    "",
+                    raw_content,
                 ).strip()
                 if cleaned_desc and not cleaned_desc.endswith("."):
                     cleaned_desc += "."
@@ -373,11 +656,12 @@ class GemmaTriageClient:
                 )
 
             logger.info(
-                "Tier 1 Gemma vision triage [%s]: prompt='%s' | response='%s' | "
-                "verdict=%s score=%.2f tags=%s (latency=%.1fms)",
+                "Tier 1 Gemma System-1 triage [%s]: mode=%s | response='%s' | "
+                "verdict=%s decision=%s p_threat=%.3f tags=%s (latency=%.1fms)",
                 drone_id,
-                prompt_text,
+                mode.value,
                 raw_content.strip(),
+                verdict.value,
                 decision,
                 score,
                 tags,
@@ -390,6 +674,8 @@ class GemmaTriageClient:
                 triage_score=score,
                 tier1_latency_ms=latency_ms,
                 tier1_decision=decision,  # type: ignore[arg-type]
+                verdict=verdict,
+                class_probabilities=class_probs,
                 tags=tags,
                 raw_output=raw_content,
                 scene_description=scene_description,
@@ -397,7 +683,6 @@ class GemmaTriageClient:
             )
 
         except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError) as exc:
-            # Circuit breaker: fail open to Gemini on timeout or HTTP 5xx
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             if not self._circuit_tripped:
                 logger.warning(
@@ -419,6 +704,7 @@ class GemmaTriageClient:
                 triage_score=1.0,
                 tier1_latency_ms=latency_ms,
                 tier1_decision="CIRCUIT_BREAKER_BYPASS",
+                verdict=TriageVerdict.CRITICAL,
                 tags=["circuit_breaker_fail_open"],
                 raw_output=str(exc),
                 model_name=target_model,
@@ -432,6 +718,7 @@ class GemmaTriageClient:
                 triage_score=1.0,
                 tier1_latency_ms=latency_ms,
                 tier1_decision="CIRCUIT_BREAKER_BYPASS",
+                verdict=TriageVerdict.CRITICAL,
                 tags=["circuit_breaker_unexpected_error"],
                 raw_output=str(unexpected),
                 model_name=target_model,

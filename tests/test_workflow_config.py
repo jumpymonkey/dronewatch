@@ -281,6 +281,7 @@ async def test_stream_processor_routes_to_gemma_tier2(
         ambiguity_policy=custom_config.ambiguity_policy,
         vllm_temperature=custom_config.vllm_temperature,
         vllm_max_tokens=custom_config.vllm_max_tokens,
+        triage_mode=custom_config.triage_mode,
     )
 
     # Assert Tier 2 Gemma was called with custom prompt and dynamic parameters
