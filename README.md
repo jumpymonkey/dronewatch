@@ -6,13 +6,13 @@ DroneWatch provides real-time AI-powered threat detection, multi-camera RTSP ing
 
 ---
 
-### Architecture Overview
+### Architecture Overview (v3.0 System 1 Decision Framework)
 
-DroneWatch employs a **Hierarchical Two-Tier AI Inference Architecture** designed to maximize detection fidelity while reducing frontier multimodal LLM API consumption by up to 95%.
+DroneWatch v3.0 employs a **System 1 Decision Framework & Two-Tier Cascade Architecture** designed to maximize detection fidelity, eliminate keyword-negation false positives, guarantee non-cascading frame latency, and reduce frontier multimodal LLM API consumption by up to 95%.
 
-For complete architectural specifications, latency models, and formal Pydantic data contracts, see the comprehensive [Architecture Design Document](docs/ARCHITECTURE.md).
+For complete mathematical specifications (softmax `top_logprobs` calibration & Shannon entropy), anti-snowball backpressure guarantees, and formal Pydantic data contracts, see the comprehensive [Architecture Design Document](docs/ARCHITECTURE.md).
 
-### Runtime Ingestion & Tiered AI Processing Flow
+### Runtime Ingestion & System 1 Decision Flow
 
 ```
                                ┌─────────────────────────────────────────────────┐
@@ -29,31 +29,39 @@ For complete architectural specifications, latency models, and formal Pydantic d
 │   └─────────────┬─────────────┘      └────────────┬────────────┘                                        │
 │                 │                                 │ Motion Detected (>= 500 px)                         │
 │                 │                                 ▼                                                     │
-│                 │                    ┌─────────────────────────┐   Escalation Warranted                 │
-│                 │                    │ Tier 1: Gemma 4         ├──────────────────────────┐             │
-│                 │                    │ Triage (Cloud Run GPU)  │   (Threat Candidate)     │             │
-│                 │                    └────────────┬────────────┘                          │             │
-│                 │                                 │ Benign / Clear (< 0.50)              │             │
-│                 │                                 ▼ (Dropped, 0 Gemini Cost)             │             │
-│                 ▼                                                                        ▼             │
-│   ┌───────────────────────────┐                                               ┌─────────────────────┐   │
-│   │ MJPEG Streaming Endpoint  │                                               │ Tier 2: Gemini 3.6  │   │
-│   │ GET /api/streams/{id}/video│                                              │ Flash (Vertex AI)   │   │
-│   └───────────────────────────┘                                               └──────────┬──────────┘   │
-│                                                                                          │ Validated    │
-│                                                                                          │ Alert        │
-│                                                                                          ▼              │
-│                                                                               ┌─────────────────────┐   │
-│                                                                               │ Real-time Alerts    │   │
-│                                                                               │ WebSocket /ws/alerts│   │
-│                                                                               └──────────┬──────────┘   │
-└──────────────────────────────────────────────────────────────────────────────────────────┼──────────────┘
-                                                                                           │
-                                                                                           ▼
-                                                                                ┌─────────────────────┐
-                                                                                │ React / Vite UI     │
-                                                                                │ Real-Time Dashboard │
-                                                                                └─────────────────────┘
+│                 │                    ┌─────────────────────────┐                                        │
+│                 │                    │ Tier 1: Gemma 4 (vLLM)  │  Constrained 1-Token Choice            │
+│                 │                    │ SAFE|SUSPICIOUS|CRITICAL│  + Softmax top_logprobs (~20ms)        │
+│                 │                    └────────────┬────────────┘                                        │
+│                 │                                 ▼                                                     │
+│                 │                    ┌──────────────────────────────────────┐                           │
+│                 │                    │ Deterministic DecisionEngine         │                           │
+│                 │                    │ - Band 0 (< 0.25): SUPPRESS (0 Cost) │                           │
+│                 │                    │ - Band 1 (0.25–0.50): O(1) k-of-n    │                           │
+│                 │                    │ - Band 2 (>= 0.50): ESCALATE         │                           │
+│                 │                    │ - Single-Flight Lock + 3.0s Cooldown │                           │
+│                 │                    └───────────────────┬──────────────────┘                           │
+│                 ▼                                        │ Corroborated / Immediate Escalation          │
+│   ┌───────────────────────────┐                          ▼                                              │
+│   │ MJPEG Streaming Endpoint  │              ┌──────────────────────────────┐                           │
+│   │ GET /api/streams/{id}/video│             │ Tier 2: Deep Reasoning       │                           │
+│   └───────────────────────────┘              │ Gemini Flash (Vertex AI) OR  │                           │
+│                                              │ Gemma 4 / DiffusionGemma     │                           │
+│                                              └──────────────┬───────────────┘                           │
+│                                                             │ Decoupled Dispatch Policy                 │
+│                                                             │ + Monotonic Timestamp Watermark           │
+│                                                             ▼                                           │
+│                                              ┌──────────────────────────────┐                           │
+│                                              │ Real-Time Validated Alerts   │                           │
+│                                              │ WebSocket /ws/alerts + DB    │                           │
+│                                              └──────────────┬───────────────┘                           │
+└─────────────────────────────────────────────────────────────┼───────────────────────────────────────────┘
+                                                              │
+                                                              ▼
+                                                   ┌─────────────────────┐
+                                                   │ React / Vite UI     │
+                                                   │ Real-Time Dashboard │
+                                                   └─────────────────────┘
 ```
 
 ---
@@ -74,9 +82,9 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 │   ┌───────────────────────────────┐                       │                           │                            │
 │   │ Cloud Run (Serverless)        │◄──────────────────────┘                           │                            │
 │   │ dronewatch-backend            │                                                   │                            │
-│   │ - FastAPI Ingestion Engine    │                                                   │                            │
+│   │ - FastAPI + DecisionEngine    │                                                   │                            │
 │   │ - Embedded React SPA Bundle   │                                                   │                            │
-│   │ - 2 vCPU / 4 GiB RAM          │                                                   │                            │
+│   │ - 2 vCPU / 4–8 GiB RAM        │                                                   │                            │
 │   └──────┬────────────┬───────────┘                                                   │                            │
 │          │            │                                                               │                            │
 │          │ Direct VPC │ Internal VPC / HTTPS + IAM                                    │                            │
@@ -85,12 +93,12 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 │          │   ┌─────────────────────────────────────────────────┐                      │                            │
 │          │   │ Cloud Run: dronewatch-gemma-triage              │◄─────────────────────┘                            │
 │          │   │ - Tier 1: Gemma 4 (google/gemma-4-E2B-it)       │                                                   │
-│          │   │ - vLLM Serving + GCS FUSE Model Mount           │                                                   │
-│          │   │ - 1x NVIDIA RTX Pro 6000 / L4 GPU (Scale-to-0)  │                                                   │
-│          │   │ - Ingress: Internal Only (No Public IP)         │                                                   │
+│          │   │ - vLLM guided_choice + top_logprobs + GCS FUSE  │                                                   │
+│          │   │ - 1x NVIDIA RTX Pro 6000 (20 vCPU / 80 GiB)     │                                                   │
+│          │   │ - Ingress: Internal Only (Scale-to-Zero)        │                                                   │
 │          │   └────────┬────────────────────────────────────────┘                                                   │
+│          │            │ Corroborated / Immediate                                                                   │
 │          │            │ Threat Candidate                                                                           │
-│          │            │ Escalation                                                                                 │
 │          │            ▼                                                                                            │
 │          │   ┌─────────────────────────────────────────────────┐                                                   │
 │          │   │ Vertex AI (locations/global)                    │                                                   │
@@ -101,7 +109,7 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 │   ┌───────────────────────────────┐        ┌──────────────────────────────┐                                        │
 │   │ AlloyDB for PostgreSQL        │        │ Cloud Storage (GCS)          │                                        │
 │   │ - pgvector Extension          │        │ - <YOUR_GCP_PROJECT_ID>-videos│                                        │
-│   │ - Incident Event Persistence  │        │ - <YOUR_GCP_PROJECT_ID>-snaps │                                        │
+│   │ - Incident & Decision Audit   │        │ - <YOUR_GCP_PROJECT_ID>-snaps │                                        │
 │   └───────────────────────────────┘        └──────────────────────────────┘                                        │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -110,33 +118,33 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 
 | Component | Service | Role & Responsibility |
 |---|---|---|
-| **Ingestion & Serving** | **Cloud Run (`dronewatch-backend`)** | Fully managed serverless container runtime hosting the FastAPI backend, RTSP stream ingestion, OpenCV motion gate, and compiled React SPA static bundle. Configured with `--min-instances=1` to eliminate cold-start delays on video streams. |
-| **Tier 1 Vision Triage** | **Cloud Run GPU (`dronewatch-gemma-triage`)** | Internal microservice running Google's open vision-language model `gemma-4-E2B-it` via vLLM with GCS FUSE weight loading on a dedicated **NVIDIA GPU**. Scales to zero (`--min-instances=0`) when idle; protected by a fail-open circuit breaker on the backend. Rapidly screens candidate frames in ~40ms with IAM-authenticated private VPC ingress. |
-| **Tier 2 Frontier AI** | **Vertex AI (`gemini-3.6-flash`)** | Multimodal reasoning engine under `locations/global`. Invoked strictly when Tier 1 detects suspicious or ambiguous activity. Performs deep policy evaluation, threat classification, bounding-box generation, and dispatch narrative formatting. |
-| **Relational & Vector DB** | **AlloyDB for PostgreSQL** | High-performance PostgreSQL cluster with `pgvector` extension for storing incident logs, camera configurations, and vector embeddings for semantic security query retrieval. |
-| **Container Management** | **Artifact Registry** | Secure Docker container repository hosting regional DroneWatch application builds (`us-central1-docker.pkg.dev/...`). |
-| **Build Pipeline** | **Cloud Build** | Serverless CI/CD image compilation pipeline that packages Python dependencies (`uv`) and frontend React build artifacts into production containers. |
-| **Network & Security** | **Direct VPC Egress & Internal Ingress** | Secure private VPC connectivity allowing Cloud Run container instances to communicate directly with AlloyDB private IP endpoints (`10.0.0.x`) and internal Gemma inference endpoints without public internet traversal. |
-| **Object Storage** | **Cloud Storage (GCS)** | Object storage buckets for archiving raw MP4 surveillance footage, storing model weights (`jal-dronewatch-models`), and storing JPEG threat snapshot crops generated during security incidents. |
+| **Ingestion & Decision Engine** | **Cloud Run (`dronewatch-backend`)** | Serverless runtime hosting FastAPI, RTSP/MP4 ingestion, OpenCV motion gate, deterministic `DecisionEngine`, and compiled React SPA bundle (`--min-instances=1`). |
+| **Tier 1 System 1 Triage** | **Cloud Run GPU (`dronewatch-gemma-triage`)** | Internal microservice running `google/gemma-4-E2B-it` via vLLM (`guided_choice` + `top_logprobs`) with GCS FUSE weight loading on an **NVIDIA RTX Pro 6000** (or parameterized L4). Scales to zero (`--min-instances=0`) when idle; protected by a fail-open circuit breaker. |
+| **Tier 2 Deep Reasoning** | **Vertex AI (`gemini-3.6-flash`) / Cloud Run GPU** | Invoked strictly on corroborated Band 1 or immediate Band 2 candidates. Supports Vertex AI Gemini models or self-hosted vLLM (`google/gemma-4-E2B-it` / `google/diffusiongemma-26B-A4B-it`). |
+| **Relational & Vector DB** | **AlloyDB for PostgreSQL** | PostgreSQL cluster with `pgvector` storing incident events, `routing_action` / `dispatch_action` audit trails, and hot-reloaded `workflow_settings`. |
+| **Container Management** | **Artifact Registry** | Regional Docker repository hosting DroneWatch builds (`us-central1-docker.pkg.dev/...`). |
+| **Build Pipeline** | **Cloud Build** | Serverless CI/CD image compilation packaging Python dependencies (`uv`) and React SPA build artifacts. |
+| **Network & Security** | **Direct VPC Egress & Internal Ingress** | Private VPC connectivity to AlloyDB (`10.0.0.x`) and IAM-authenticated internal vLLM triage endpoints with zero public egress for raw triage frames. |
+| **Object Storage** | **Cloud Storage (GCS)** | Buckets for archived MP4 streams, model weights (`jal-dronewatch-models`), and JPEG incident snapshots. |
 
 ---
 
 ## Key Features & Component Design
 
-### 1. Hierarchical Two-Tier AI Vision Pipeline
-- **Tier 0 (Algorithmic Motion Filter):** OpenCV absolute frame differencing ($21 \times 21$ Gaussian blur, threshold $T=15$, $\ge 500\,\text{px}$ contour area) eliminates 75% of static frames on local CPU before invoking any neural network.
-- **Tier 1 (Front-Line Gemma 4 Triage on Cloud Run):**
-  - **Model:** `google/gemma-4-E2B-it` running on Cloud Run with a dedicated **NVIDIA GPU** (RTX Pro 6000 / L4) and vLLM OpenAI-compatible runtime.
-  - **Scale-to-Zero (`--min-instances=0`):** Idle GPU instances terminate to eliminate compute costs when drones are grounded. Cold starts (~35s–45s) are seamlessly cushioned by the backend's fail-open circuit breaker to Gemini Flash.
-  - **Latency:** ~35ms–50ms per active frame evaluation.
-  - **Triage Gate:** Rapidly screens candidate frames for security relevance. Normal pedestrians, authorized vehicles on roads, and swaying foliage receive a low triage score (`< 0.50`) and are discarded without invoking external frontier APIs.
-  - **Periodic Scene Description Heartbeat:** Unconditionally queries Gemma 4 every 10 seconds to generate a concise 15-word surveillance summary and operator HUD confirmation without writing benign entries to the database.
-  - **Cost Impact:** Suppresses 93%–97% of motion-triggered frames from reaching Gemini, slashing frontier multimodal API costs by over 90%.
-- **Tier 2 (Frontier Multimodal Reasoning via Gemini 3.6 Flash):**
-  - **Model:** `gemini-3.6-flash` accessed via the Google GenAI SDK targeting `locations/global`.
-  - **Escalation Trigger:** Invoked strictly when Tier 1 detects potential threats, hazards, or ambiguous security events (`triage_score >= 0.50`).
-  - **Deep Contextual Validation:** Performs full spatial and policy reasoning, assesses severity levels (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), extracts normalized bounding boxes `[ymin, xmin, ymax, xmax]`, and formats dispatch-ready incident narratives.
-  - **Structured Pydantic Outputs:** Strictly validated via Pydantic v2 schemas (`AnalysisResult`).
+### 1. System 1 Decision Framework & Two-Tier Vision Cascade (v3.0)
+- **Tier 0 (Algorithmic Motion Filter):** OpenCV absolute frame differencing ($21 \times 21$ Gaussian blur, threshold $T=15$, $\ge 500\,\text{px}$ contour area) eliminates ~75% of static frames on local CPU in ~2ms.
+- **Tier 1 (Calibrated Gemma 4 Triage on Cloud Run GPU):**
+  - **Constrained Logprob Calibration:** Executes single-token constrained decoding (`guided_choice=["SAFE", "SUSPICIOUS", "CRITICAL"]`, `top_logprobs=10`) on `google/gemma-4-E2B-it` in ~15ms–25ms. Exact softmax normalization produces calibrated threat probability $P(\text{threat}) = P(\text{SUSPICIOUS}) + P(\text{CRITICAL})$ and normalized Shannon entropy $H_{\text{norm}} \in [0, 1]$.
+  - **Automatic Fallback & Negation Safety:** Gracefully retries without `guided_choice` if a custom OpenAI-compatible server returns HTTP 400/422, applying clause-scoped negation stripping (`"walkway is clear without hazards"` $\to$ `SAFE`, while `"no fire, but intruder climbing fence"` $\to$ `ALERT`).
+  - **3-Band Deterministic Routing (`DecisionEngine`):**
+    - **Band 0 (`P(threat) < suppress_threshold`, default `0.25`):** `SUPPRESS` immediately at zero API cost.
+    - **Band 1 (`0.25 <= P(threat) < 0.50` or high entropy):** `CORROBORATE_HOLD` / `ESCALATE_CORROBORATED` using a non-blocking $O(1)$ per-stream `k-of-n` (`2-of-3`) ring buffer.
+    - **Band 2 (`P(threat) >= gemma_triage_threshold`, default `0.50`, or `CRITICAL`):** `ESCALATE_IMMEDIATE` on the first frame.
+  - **Anti-Snowball Backpressure Guarantees:** Prevents Tier 2 latency cascades via non-sleeping ring buffers, per-stream single-flight Tier 2 locks (`tier2_in_flight`), configurable non-`CRITICAL` escalation cooldowns (`3.0s` default), and monotonic video timestamp watermarks (`STALE_WATERMARK_DROPPED`).
+  - **10-Second HUD Heartbeat:** Unconditionally queries Gemma 4 every 10s for a <15-word operator patrol summary streamed directly over WebSockets without AlloyDB write amplification.
+- **Tier 2 (Frontier Multimodal Reasoning & Decoupled Dispatch):**
+  - **Model Agility:** Escalates to `gemini-3.6-flash` on Vertex AI (with selectable `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-4-aragon`) or self-hosted Gemma 4 / `google/diffusiongemma-26B-A4B-it` (parallel block-denoising MoE for fast structured JSON).
+  - **Decoupled Dispatch Policy:** Supports an independent `dispatch_confidence_threshold` so operators can keep Tier 1 screening sensitive while requiring high confidence before sounding HUD sirens.
 
 ### 2. Dual Video Ingestion Engine
 - **RTSP Live Feeds:** Decoded via OpenCV (`cv2.VideoCapture`) with low-buffer size flags (`CAP_PROP_BUFFERSIZE=1`) to eliminate buffering latency on live camera feeds.
@@ -145,28 +153,14 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 
 ### 3. Real-Time Alert Dispatch & Dashboard
 - **WebSockets:** The FastAPI server pushes real-time threat detection events (`IncidentEvent`) directly to connected frontend clients over `/ws/alerts`.
-- **AlloyDB + pgvector Integration:** Confirmed incident events and spatial telemetry are persisted to AlloyDB for PostgreSQL with vector embeddings for retrospective semantic queries.
+- **AlloyDB + pgvector Integration:** Confirmed incident events, decision routing/dispatch actions, and spatial telemetry are persisted to AlloyDB for PostgreSQL with vector embeddings for semantic retrieval.
 - **Frontend Error Resilience:** The React + Vite frontend (`StreamGrid`) features auto-retry logic with cache-busting on `<img className="video-player">` elements to seamlessly manage RTSP connection handshakes.
 
-### 4. Dynamic Workflow Administration & Multimodal Model Agility
-- **In-App Administration Tab:** Dedicated admin console in the React dashboard to adjust vision pipelines, inference thresholds, and model parameters in real time without service redeployment or stream interruptions.
-- **Tier 1 Gemma Triage Controls:**
-  - Toggle Tier 1 triage gate on/off. When disabled, all motion-triggered frames route directly to Tier 2.
-  - Customize the zero-shot Gemma triage prompt.
-  - Adjust escalation confidence threshold ($0.00$ to $1.00$).
-- **Gemma 4 & vLLM Runtime Parameters:**
-  - **Endpoint & Model Selection:** Runtime override of the vLLM service URL and model identifier (`google/gemma-4-E2B-it`, `google/gemma-4-4B-it`, `google/gemma-4-27B-it`, or custom HuggingFace/vLLM endpoints).
-  - **Inference Sampling:** Configurable sampling temperature ($0.0$ to $2.0$), generation token budget ($8$ to $512$ tokens), and request timeout ($0.5\text{s}$ to $30.0\text{s}$).
-  - **Ambiguity Policy:** Selectable resolution policy (`FAIL_SAFE` vs `CONSERVATIVE`) determining triage behavior when Gemma generates ambiguous or unclassified responses (defaulting to safe escalation at $0.80$ confidence under `FAIL_SAFE`).
-  - **Dynamic Keyword Taxonomy:** In-browser tag chip editor to add/remove alert triggers (`alert`, `hazard`, `equipment`, `machinery`, `obstruction`) and benign indicators (`safe`, `normal`, `clear`), persisted directly as JSON in AlloyDB.
-- **Tier 2 Escalation Engine:**
-  - Choose between **Gemini** (default) or **Gemma** for Tier 2 deep analysis.
-  - Dedicated prompt editors for Gemini and Gemma escalations with automated schema guidance.
-- **Dynamic Gemini Escalation Models:**
-  - Dynamic model dropdown supporting `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-4-aragon`, and custom model identifiers.
-- **AlloyDB Persistence & Versioning:** Singleton configuration table (`workflow_settings`) with full audit history tracking (`workflow_settings_history`), revision counters, and automatic backward-compatible schema migrations.
-- **Live Stream HUD Attribution:** Drone video overlays display active model badges, analysis source tier (`triage` vs `escalation`), and round-trip inference latencies in milliseconds.
-- **Complete Response Auditing:** Structured logging and in-memory telemetry capture exact raw responses, summaries, and classifications from both triage and escalation tiers.
+### 4. Dynamic Workflow Administration Console (`AdminView.jsx`)
+- **Hot-Reloaded System 1 Controls:** Switch live between `DECISION_FRAMEWORK` (vLLM logprobs) and `KEYWORD_LEGACY`, tune Band 0 (`suppress_threshold`) and Band 2 (`gemma_triage_threshold`) sliders, adjust `k-of-n` corroboration depth (`corroboration_hits` / `corroboration_window`), and configure the `escalation_cooldown_seconds` anti-snowball window.
+- **Independent Tier 2 Cutoff:** Toggle an independent `dispatch_confidence_threshold` or inherit the Tier 1 Band 2 cutoff.
+- **Model & Runtime Selectors:** Select Vertex AI Gemini models or vLLM Gemma models (including `google/gemma-4-E2B-it` and `google/diffusiongemma-26B-A4B-it`), tune temperature/max tokens/timeouts, edit alert/benign keyword chips, and inspect `routing_action` / `dispatch_action` traces in the Live AI Telemetry log.
+- **AlloyDB Persistence & Versioning:** Singleton configuration table (`workflow_settings`) with revision history (`workflow_settings_history`) and automatic `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations.
 
 ---
 
@@ -178,19 +172,24 @@ Environment variables are loaded via `pydantic-settings` from `.env`:
 |---|---|---|
 | `DRONEWATCH_GCP_PROJECT_ID` | `dronewatch-project` | Google Cloud project ID for Vertex AI |
 | `DRONEWATCH_GCP_LOCATION` | `global` | Vertex AI regional endpoint location |
-| `DRONEWATCH_GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model version for vision analysis |
+| `DRONEWATCH_GEMINI_MODEL` | `gemini-3.6-flash` | Default Gemini model version for Tier 2 escalation |
 | `DRONEWATCH_USE_VERTEX_AI` | `true` | Enable Vertex AI client initialization |
 | `DRONEWATCH_ENABLE_TIER1_GEMMA` | `false` | Enable Tier 1 Gemma inference triage gate |
+| `DRONEWATCH_TRIAGE_MODE` | `DECISION_FRAMEWORK` | Tier 1 mode (`DECISION_FRAMEWORK` or `KEYWORD_LEGACY`) |
 | `DRONEWATCH_GEMMA_SERVICE_URL` | `""` | Internal Cloud Run URL for Tier 1 triage |
 | `DRONEWATCH_GEMMA_MODEL_NAME` | `google/gemma-4-E2B-it` | Target model identifier served by vLLM |
-| `DRONEWATCH_GEMMA_TRIAGE_THRESHOLD` | `0.50` | Triage score cutoff for escalating to Gemini |
-| `DRONEWATCH_GEMMA_TIMEOUT_SECONDS` | `2.0` | Maximum timeout before failing open to Gemini |
-| `DRONEWATCH_GEMMA_TRIAGE_PROMPT` | `"detect campus security anomalies..."` | Zero-shot triage classification prompt |
-| `DRONEWATCH_GEMMA_SCENE_DESCRIPTION_INTERVAL_SECONDS` | `10.0` | Cadence for routine surveillance telemetry |
+| `DRONEWATCH_SUPPRESS_THRESHOLD` | `0.25` | Band 0 ceiling below which `P(threat)` is suppressed |
+| `DRONEWATCH_GEMMA_TRIAGE_THRESHOLD` | `0.50` | Band 2 cutoff at/above which `P(threat)` escalates immediately |
+| `DRONEWATCH_CORROBORATION_HITS` | `2` | Required Band 1 hits (`k`) within window (`n`) to escalate |
+| `DRONEWATCH_CORROBORATION_WINDOW` | `3` | Non-blocking per-stream ring buffer window size (`n`) |
+| `DRONEWATCH_ESCALATION_COOLDOWN_SECONDS` | `3.0` | Anti-snowball cooldown suppressing duplicate non-`CRITICAL` calls |
+| `DRONEWATCH_GEMMA_TIMEOUT_SECONDS` | `2.0` | Maximum timeout before circuit breaker fails open to Gemini |
+| `DRONEWATCH_GEMMA_TRIAGE_PROMPT` | `"detect campus security anomalies..."` | Policy criteria evaluated during Tier 1 triage |
+| `DRONEWATCH_GEMMA_SCENE_DESCRIPTION_INTERVAL_SECONDS` | `10.0` | Cadence for routine surveillance HUD telemetry |
 | `DRONEWATCH_GEMMA_SCENE_DESCRIPTION_PROMPT` | `"Briefly describe this drone surveillance..."` | Prompt for 10s HUD scene heartbeat |
 | `DRONEWATCH_FRAME_SAMPLING_FPS` | `1.0` | Target frame evaluation rate (frames/sec) |
 | `DRONEWATCH_MOTION_SENSITIVITY_THRESHOLD` | `15.0` | OpenCV pixel delta intensity threshold |
-| `DRONEWATCH_MIN_MOTION_AREA` | `500` | Minimum pixel contour area to trigger LLM evaluation |
+| `DRONEWATCH_MIN_MOTION_AREA` | `500` | Minimum pixel contour area to trigger Tier 1 evaluation |
 | `DRONEWATCH_MAX_CONCURRENT_STREAMS` | `4` | Maximum parallel video ingestion streams |
 | `DRONEWATCH_GCS_BUCKET_VIDEOS` | `dronewatch-videos-bucket` | GCS Bucket for video streams |
 | `DRONEWATCH_GCS_BUCKET_SNAPSHOTS` | `dronewatch-snapshots-bucket` | GCS Bucket for alert snapshots |
@@ -359,7 +358,7 @@ textPayload=~"Tier 1 Gemma vision triage"
 
 Sample log entry emitted per evaluated frame:
 ```text
-INFO: Tier 1 Gemma vision triage [drone-alpha]: prompt='detect campus security anomalies...' | response='SAFE' | verdict=BENIGN score=0.05 tags=['safe'] (latency=41.2ms)
+INFO: Tier 1 Gemma vision triage [drone-alpha]: mode='DECISION_FRAMEWORK' | response='SAFE' | verdict=SAFE score=0.042 entropy=0.118 tags=['safe'] (latency=19.4ms)
 ```
 
 To monitor periodic 10-second HUD scene telemetry:
@@ -376,7 +375,7 @@ resource.labels.service_name="dronewatch-gemma-triage"
 ```
 
 > [!NOTE]
-> **Cold Start Handling:** When `dronewatch-gemma-triage` scales to zero (`min-instances=0`), an incoming request during container cold start will encounter a brief delay (~35s–45s). The backend's resilient **fail-open circuit breaker** catches the HTTP timeout, immediately escalates the frame to Gemini 3.6 Flash without dropping surveillance, and logs a recovery notice once Gemma returns `200 OK`.
+> **Cold Start Handling:** When `dronewatch-gemma-triage` scales to zero (`min-instances=0`), an incoming request during container cold start will encounter a brief delay (~35s–45s). The backend's resilient **fail-open circuit breaker** catches the HTTP timeout, immediately escalates the frame to Gemini 3.6 Flash (`CIRCUIT_BREAKER_BYPASS`) without dropping surveillance, and logs a recovery notice once Gemma returns `200 OK`.
 
 ---
 
@@ -385,7 +384,7 @@ resource.labels.service_name="dronewatch-gemma-triage"
 ```
 dronewatch/
 ├── docs/
-│   └── ARCHITECTURE.md               # Two-Tier Hierarchical AI Architecture Specification
+│   └── ARCHITECTURE.md               # v3.0 System 1 Decision Framework Architecture Specification
 ├── frontend/                         # React + Vite frontend application
 │   ├── src/
 │   │   ├── components/               # UI Components (StreamGrid, Header, AlertSidebar, AdminView)
@@ -394,23 +393,25 @@ dronewatch/
 │   └── vite.config.js                # Vite dev server configuration
 ├── scripts/                          # Automated deployment scripts
 │   ├── deploy_gcp.sh                 # Cloud Run Backend deployment script
-│   └── deploy_gemma_triage.sh        # Cloud Run GPU Gemma 4 triage deployment script
+│   └── deploy_gemma_triage.sh        # Parameterized Cloud Run GPU (RTX Pro 6000 / L4) vLLM script
 ├── src/dronewatch/                   # Core Python backend package
 │   ├── db/                           # AlloyDB / local memory store implementations
 │   ├── models/                       # Pydantic v2 schemas
-│   │   ├── events.py                 # IncidentEvent, AnalysisResult & Telemetry contracts
-│   │   ├── triage.py                 # GemmaTriageRequest & Response models
-│   │   └── workflow_config.py        # WorkflowConfig & WorkflowConfigUpdate schemas
+│   │   ├── events.py                 # IncidentEvent, AnalysisResult & routing/dispatch contracts
+│   │   ├── triage.py                 # TriageVerdict, TriageClassProbabilities & Routing/Dispatch enums
+│   │   └── workflow_config.py        # WorkflowConfig (3-band + corroboration + cooldown schemas)
 │   ├── services/
 │   │   ├── analyzer.py               # Gemini vision analyzer service (dynamic model support)
-│   │   ├── gemma_client.py           # Tier 1 triage & Tier 2 Gemma deep inspection client
+│   │   ├── decision_engine.py        # Deterministic 3-band routing, O(1) corroboration & anti-snowball
+│   │   ├── gemma_client.py           # Logprob-calibrated Tier 1 triage & Tier 2 deep inspection client
 │   │   ├── motion_filter.py          # OpenCV motion pre-filtering service
-│   │   └── stream_processor.py       # Ingestion engine with dynamic tiered routing & hot-reloading
+│   │   └── stream_processor.py       # Ingestion engine with non-blocking corroboration & watermarks
 │   ├── config.py                     # Application settings (pydantic-settings)
-│   └── main.py                       # FastAPI REST API & WebSocket endpoints
-├── tests/                            # Pytest test suite (57 tests)
+│   └── main.py                       # FastAPI REST API & WebSocket endpoints (v3.0.0)
+├── tests/                            # Pytest test suite (72 tests)
 │   ├── test_api.py                   # REST API and WebSocket tests
 │   ├── test_analyzer.py              # Gemini analyzer tests (dynamic models)
+│   ├── test_decision_engine.py       # Logprob calibration, 3-band routing, cooldown & watermark tests
 │   ├── test_events_model.py          # Pydantic schema validation tests
 │   ├── test_gemma_client.py          # Gemma client unit tests (OIDC, triage, circuit breaker)
 │   ├── test_stream_processor_gemma.py # Stream processor tiered pipeline tests
