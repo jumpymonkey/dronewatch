@@ -54,6 +54,12 @@ export default function AlertSidebar({ alerts, onAcknowledge }) {
                       {alert.model_name || (alert.source_model === 'gemini' ? 'Gemini Flash' : 'Gemma 4')}
                     </span>
                   )}
+                  {alert.routing_action && (
+                    <span className="alert-decision-tag" title="System 1 Routing → Tier 2 Dispatch">
+                      {alert.routing_action}
+                      {alert.dispatch_action ? ` → ${alert.dispatch_action}` : ''}
+                    </span>
+                  )}
                   {alert.video_timestamp_formatted && (
                     <span className="video-timecode-tag" title="Video Stream Timecode">
                       TC {alert.video_timestamp_formatted}

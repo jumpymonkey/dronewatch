@@ -13,12 +13,14 @@ import {
   Check,
   X,
   Sparkles,
+  Activity,
 } from 'lucide-react';
 
 export default function StreamGrid({
   streams,
   activeAlerts,
   telemetry = {},
+  decisionTelemetry = {},
   onUnregisterStream,
   onOpenRegisterModal,
 }) {
@@ -42,10 +44,19 @@ export default function StreamGrid({
     return `/api/streams/${encodeURIComponent(stream.drone_id)}/video${streamParam}`;
   };
 
+  const getRoutingPillClass = (action) => {
+    if (!action) return 'decision-pill-suppress';
+    if (action === 'SUPPRESS') return 'decision-pill-suppress';
+    if (action === 'CORROBORATE_HOLD') return 'decision-pill-hold';
+    if (action === 'COOLDOWN_SKIP') return 'decision-pill-cooldown';
+    return 'decision-pill-escalate';
+  };
+
   return (
     <div className="streams-container">
       {streams.map((stream) => {
         const droneTelemetry = telemetry[stream.drone_id];
+        const decision = decisionTelemetry[stream.drone_id];
         const hasAlert = activeAlerts.some(
           (a) => a.drone_id === stream.drone_id && !a.acknowledged_by_pilot
         );
@@ -60,6 +71,26 @@ export default function StreamGrid({
         const isGemini = sourceModel === 'gemini';
         const modelLabel = droneTelemetry?.model_name || (isGemini ? 'Gemini Flash' : 'Gemma 4');
         const tierLabel = isEscalation ? 'Tier 2 Escalation' : 'Tier 1 Triage';
+
+        // System 1 Decision Engine live metrics
+        const pThreat = decision?.p_threat ?? null;
+        const suppressThresh = decision?.suppress_threshold ?? 0.25;
+        const escalateThresh = decision?.escalate_threshold ?? 0.5;
+        const windowCap = decision?.corroboration_window_capacity ?? 3;
+        const windowHits = decision?.window_hits ?? 0;
+        const hitsRequired = decision?.corroboration_hits_required ?? 2;
+        const counts = decision?.counts || {};
+        const totalEval = counts.total_evaluated || 0;
+        const nonEscalated = (counts.suppressed || 0) + (counts.corroborate_hold || 0) + (counts.cooldown_skip || 0);
+        const savedPct = totalEval > 0 ? Math.round((nonEscalated / totalEval) * 100) : 100;
+        const meterFillClass =
+          pThreat == null
+            ? 'meter-band0'
+            : pThreat >= escalateThresh
+            ? 'meter-band2'
+            : pThreat >= suppressThresh
+            ? 'meter-band1'
+            : 'meter-band0';
 
         return (
           <div
@@ -133,6 +164,120 @@ export default function StreamGrid({
 
             {/* Live AI Telemetry HUD Banner */}
             <div className={`gemini-hud-banner ${isThreat ? 'threat-active' : ''}`}>
+              {/* Real-Time System 1 Decision Engine Strip (Updates Every 1 FPS Frame) */}
+              <div className="decision-hud-strip">
+                {decision ? (
+                  <>
+                    <div className="decision-hud-top">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        <span
+                          className={`decision-mode-tag ${
+                            decision.calibrated_from_logprobs ? 'mode-logprob' : 'mode-keyword'
+                          }`}
+                          title={
+                            decision.calibrated_from_logprobs
+                              ? 'Calibrated via exact vLLM top-logprobs softmax'
+                              : `Mode: ${decision.triage_mode}`
+                          }
+                        >
+                          <Activity size={10} style={{ marginRight: '3px' }} />
+                          {decision.calibrated_from_logprobs ? 'SYS-1 LOGPROB' : 'SYS-1 GATE'}
+                        </span>
+                        <span
+                          className={`decision-action-pill ${getRoutingPillClass(decision.routing_action)}`}
+                          title={`Reason: ${decision.reason}`}
+                        >
+                          {decision.routing_action}
+                        </span>
+                        {decision.dispatch_action && decision.dispatch_action !== 'CLEAR_ROUTINE' && (
+                          <span className="decision-dispatch-tag">
+                            &rarr; {decision.dispatch_action}
+                          </span>
+                        )}
+                      </div>
+                      <span className="decision-hud-timing">
+                        {decision.video_timestamp_formatted
+                          ? `TC ${decision.video_timestamp_formatted} • `
+                          : ''}
+                        {Math.round(decision.latency_ms || 0)}ms
+                      </span>
+                    </div>
+
+                    <div className="decision-hud-meter-row">
+                      <span
+                        className="decision-p-readout"
+                        title={`P(SAFE)=${(decision.p_safe ?? 1).toFixed(3)} | P(SUSP)=${(
+                          decision.p_suspicious ?? 0
+                        ).toFixed(3)} | P(CRIT)=${(decision.p_critical ?? 0).toFixed(3)}`}
+                      >
+                        P(threat): <strong>{pThreat.toFixed(3)}</strong>
+                        <span className="decision-entropy">H={Number(decision.entropy || 0).toFixed(2)}</span>
+                      </span>
+
+                      <div
+                        className="p-threat-meter-track"
+                        title={`3-Band Gate: Suppress < ${suppressThresh.toFixed(
+                          2
+                        )} | Corroborate [${suppressThresh.toFixed(2)}, ${escalateThresh.toFixed(
+                          2
+                        )}) | Escalate >= ${escalateThresh.toFixed(2)}`}
+                      >
+                        <div
+                          className={`p-threat-meter-fill ${meterFillClass}`}
+                          style={{ width: `${Math.min(100, Math.max(2, pThreat * 100))}%` }}
+                        />
+                        <div
+                          className="p-threat-marker marker-suppress"
+                          style={{ left: `${suppressThresh * 100}%` }}
+                        />
+                        <div
+                          className="p-threat-marker marker-escalate"
+                          style={{ left: `${escalateThresh * 100}%` }}
+                        />
+                      </div>
+
+                      <div
+                        className="corroboration-dots"
+                        title={`Temporal k-of-n Corroboration Buffer: ${windowHits}/${windowCap} active Band 1+ hits (k=${hitsRequired} required)`}
+                      >
+                        {Array.from({ length: Math.min(windowCap, 8) }).map((_, idx) => (
+                          <span
+                            key={idx}
+                            className={`corrob-dot ${idx < windowHits ? 'hit' : ''}`}
+                          />
+                        ))}
+                        <span className="corrob-label">
+                          {windowHits}/{windowCap}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="decision-counters-row">
+                      <span>Frames: <strong>{totalEval}</strong></span>
+                      <span className="cnt-sep">&bull;</span>
+                      <span className="cnt-good">
+                        Suppressed: <strong>{counts.suppressed || 0}</strong> ({savedPct}% Saved)
+                      </span>
+                      <span className="cnt-sep">&bull;</span>
+                      <span className="cnt-warn">Held: <strong>{counts.corroborate_hold || 0}</strong></span>
+                      <span className="cnt-sep">&bull;</span>
+                      <span className="cnt-esc">Escalated: <strong>{counts.escalated || 0}</strong></span>
+                      {(counts.cooldown_skip || 0) > 0 && (
+                        <>
+                          <span className="cnt-sep">&bull;</span>
+                          <span className="cnt-shed">Shed: <strong>{counts.cooldown_skip}</strong></span>
+                        </>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="decision-hud-idle">
+                    <Activity size={11} color="var(--accent-cyan)" />
+                    <span>SYS-1 Decision Framework armed &bull; awaiting first motion-gated frame...</span>
+                  </div>
+                )}
+              </div>
+
               <div className="gemini-hud-header">
                 {isEscalation ? (
                   isGemini ? (
@@ -331,6 +476,22 @@ export default function StreamGrid({
                   {selectedRawResponse.video_timestamp_formatted || 'N/A'}
                 </span>
               </div>
+              {selectedRawResponse.routing_action && (
+                <div className="raw-meta-item">
+                  <span className="raw-meta-label">Routing Action:</span>
+                  <span className="raw-meta-val" style={{ color: 'var(--accent-cyan)' }}>
+                    {selectedRawResponse.routing_action}
+                  </span>
+                </div>
+              )}
+              {selectedRawResponse.dispatch_action && (
+                <div className="raw-meta-item">
+                  <span className="raw-meta-label">Dispatch Action:</span>
+                  <span className="raw-meta-val" style={{ color: '#00e676' }}>
+                    {selectedRawResponse.dispatch_action}
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="raw-modal-section">

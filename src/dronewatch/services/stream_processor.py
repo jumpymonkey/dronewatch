@@ -20,16 +20,22 @@ from dronewatch.models.events import (
     StreamStatus,
     ThreatLevel,
 )
-from dronewatch.models.triage import DispatchAction, RoutingAction
+from dronewatch.models.triage import (
+    DecisionTelemetryEvent,
+    DispatchAction,
+    GemmaTriageResponse,
+    RoutingAction,
+)
 from dronewatch.models.workflow_config import EscalationTarget, TriageMode, WorkflowConfig
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
-from dronewatch.services.decision_engine import DecisionEngine
+from dronewatch.services.decision_engine import DecisionEngine, RoutingDecision
 from dronewatch.services.gemma_client import GemmaTriageClient
 from dronewatch.services.motion_filter import MotionFilter
 
 logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[IncidentEvent], Coroutine[Any, Any, None]]
+DecisionCallback = Callable[[DecisionTelemetryEvent], Coroutine[Any, Any, None] | None]
 ConfigProvider = Callable[[], Coroutine[Any, Any, WorkflowConfig] | WorkflowConfig]
 
 
@@ -203,6 +209,7 @@ class DroneStreamProcessor:
         event_callback: EventCallback | None = None,
         config_provider: ConfigProvider | None = None,
         decision_engine: DecisionEngine | None = None,
+        decision_callback: DecisionCallback | None = None,
     ) -> None:
         """Initialize stream processor.
 
@@ -214,6 +221,7 @@ class DroneStreamProcessor:
             event_callback: Async callback invoked when an incident event is logged.
             config_provider: Optional callable returning dynamic WorkflowConfig.
             decision_engine: Optional deterministic System 1 DecisionEngine instance.
+            decision_callback: Optional callback receiving per-frame DecisionTelemetryEvent.
         """
         self.config: DroneStreamConfig = config
         if self.config.stream_url:
@@ -223,6 +231,7 @@ class DroneStreamProcessor:
         self.settings: Settings = settings
         self.analyzer: GeminiVideoAnalyzer = analyzer
         self.event_callback: EventCallback | None = event_callback
+        self.decision_callback: DecisionCallback | None = decision_callback
         self.config_provider: ConfigProvider | None = config_provider
         self.decision_engine: DecisionEngine = decision_engine or DecisionEngine()
         self.motion_filter: MotionFilter = MotionFilter(
@@ -242,6 +251,48 @@ class DroneStreamProcessor:
         # Track periodic Gemma scene description updates (every ~10s)
         self._last_scene_description_time: float = -100.0
         self._last_scene_description_wall: float = 0.0
+
+    async def _emit_decision_telemetry(
+        self,
+        triage: GemmaTriageResponse,
+        routing: RoutingDecision,
+        workflow_config: WorkflowConfig,
+        formatted_timecode: str | None,
+        dispatch_action: str | None = None,
+    ) -> None:
+        """Emit real-time System 1 Decision Engine telemetry snapshot."""
+        if self.decision_callback is None:
+            return
+        probs = triage.class_probabilities
+        telemetry_event = DecisionTelemetryEvent(
+            drone_id=self.config.drone_id,
+            timestamp=datetime.now(UTC),
+            video_timestamp_formatted=formatted_timecode,
+            triage_mode=str(workflow_config.triage_mode),
+            model_name=triage.model_name or self.settings.gemma_model_name,
+            verdict=triage.verdict,
+            p_threat=triage.triage_score,
+            p_safe=probs.safe if probs is not None else round(1.0 - triage.triage_score, 4),
+            p_suspicious=probs.suspicious if probs is not None else 0.0,
+            p_critical=probs.critical if probs is not None else 0.0,
+            entropy=probs.entropy if probs is not None else 0.0,
+            calibrated_from_logprobs=probs.calibrated_from_logprobs if probs is not None else False,
+            routing_action=str(routing.action),
+            dispatch_action=dispatch_action,
+            reason=routing.reason,
+            window_hits=routing.window_hits,
+            window_size=routing.window_size,
+            corroboration_hits_required=workflow_config.corroboration_hits,
+            corroboration_window_capacity=workflow_config.corroboration_window,
+            suppress_threshold=workflow_config.suppress_threshold,
+            escalate_threshold=workflow_config.gemma_triage_threshold,
+            latency_ms=triage.tier1_latency_ms,
+            raw_output=triage.raw_output,
+            counts=self.decision_engine.get_counts_snapshot(self.config.drone_id),
+        )
+        res = self.decision_callback(telemetry_event)
+        if asyncio.iscoroutine(res):
+            await res
 
     async def _get_active_workflow_config(self) -> WorkflowConfig:
         """Retrieve dynamic active workflow configuration or static fallback."""
@@ -314,6 +365,8 @@ class DroneStreamProcessor:
             formatted_timecode = format_video_timestamp(video_timestamp_sec)
             workflow_config = await self._get_active_workflow_config()
             routing_action_str: str | None = None
+            triage_snapshot: GemmaTriageResponse | None = None
+            routing_snapshot: RoutingDecision | None = None
 
             # Tier 1: Front-line System 1 judgment via Gemma 4 (Cloud Run GPU)
             if self.gemma_client and workflow_config.enable_tier1_gemma:
@@ -342,8 +395,28 @@ class DroneStreamProcessor:
                     video_timestamp_sec=video_timestamp_sec,
                 )
                 routing_action_str = str(routing.action)
+                triage_snapshot = triage
+                routing_snapshot = routing
+                entropy_val = (
+                    triage.class_probabilities.entropy
+                    if triage.class_probabilities is not None
+                    else 0.0
+                )
 
                 if not routing.should_escalate:
+                    initial_dispatch = (
+                        str(DispatchAction.CLEAR_ROUTINE)
+                        if is_heartbeat and routing.action == RoutingAction.SUPPRESS
+                        else None
+                    )
+                    await self._emit_decision_telemetry(
+                        triage=triage,
+                        routing=routing,
+                        workflow_config=workflow_config,
+                        formatted_timecode=formatted_timecode,
+                        dispatch_action=initial_dispatch,
+                    )
+
                     if is_heartbeat and routing.action == RoutingAction.SUPPRESS:
                         scene_desc = (
                             triage.scene_description
@@ -382,28 +455,44 @@ class DroneStreamProcessor:
                             await self.event_callback(event)
                         return
 
+                    counts = self.decision_engine.get_counts_snapshot(self.config.drone_id)
                     logger.info(
                         "DecisionEngine [%s] held/suppressed frame for %s [TC %s]: "
-                        "reason=%s p_threat=%.3f hits=%d/%d (latency=%.1fms)",
+                        "reason=%s p_threat=%.3f H=%.3f hits=%d/%d "
+                        "counts(supp=%d hold=%d esc=%d shed=%d) (latency=%.1fms)",
                         routing.action,
                         self.config.drone_id,
                         formatted_timecode or "N/A",
                         routing.reason,
                         triage.triage_score,
+                        entropy_val,
                         routing.window_hits,
                         routing.window_size,
+                        counts["suppressed"],
+                        counts["corroborate_hold"],
+                        counts["escalated"],
+                        counts["cooldown_skip"],
                         triage.tier1_latency_ms,
                     )
                     return
 
+                await self._emit_decision_telemetry(
+                    triage=triage,
+                    routing=routing,
+                    workflow_config=workflow_config,
+                    formatted_timecode=formatted_timecode,
+                )
                 logger.info(
                     "DecisionEngine [%s] escalated frame for %s [TC %s]: "
-                    "reason=%s p_threat=%.3f latency=%.1fms tags=%s",
+                    "reason=%s p_threat=%.3f H=%.3f hits=%d/%d latency=%.1fms tags=%s",
                     routing.action,
                     self.config.drone_id,
                     formatted_timecode or "N/A",
                     routing.reason,
                     triage.triage_score,
+                    entropy_val,
+                    routing.window_hits,
+                    routing.window_size,
                     triage.tier1_latency_ms,
                     triage.tags,
                 )
@@ -477,6 +566,14 @@ class DroneStreamProcessor:
                 config=workflow_config,
                 video_timestamp_sec=video_timestamp_sec,
             )
+            if triage_snapshot is not None and routing_snapshot is not None:
+                await self._emit_decision_telemetry(
+                    triage=triage_snapshot,
+                    routing=routing_snapshot,
+                    workflow_config=workflow_config,
+                    formatted_timecode=formatted_timecode,
+                    dispatch_action=str(dispatch.action),
+                )
 
             if dispatch.action == DispatchAction.STALE_WATERMARK_DROPPED:
                 logger.info(

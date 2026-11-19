@@ -657,13 +657,19 @@ class GemmaTriageClient:
 
             logger.info(
                 "Tier 1 Gemma System-1 triage [%s]: mode=%s | response='%s' | "
-                "verdict=%s decision=%s p_threat=%.3f tags=%s (latency=%.1fms)",
+                "verdict=%s decision=%s p_threat=%.3f (safe=%.3f susp=%.3f crit=%.3f H=%.3f "
+                "logprobs=%s) tags=%s (latency=%.1fms)",
                 drone_id,
                 mode.value,
                 raw_content.strip(),
                 verdict.value,
                 decision,
                 score,
+                class_probs.safe,
+                class_probs.suspicious,
+                class_probs.critical,
+                class_probs.entropy,
+                class_probs.calibrated_from_logprobs,
                 tags,
                 latency_ms,
             )

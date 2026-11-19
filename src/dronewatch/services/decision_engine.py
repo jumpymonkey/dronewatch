@@ -37,6 +37,13 @@ class StreamDecisionState:
     tier2_in_flight: bool = False
     last_escalation_wall_time: float = -1000.0
     latest_tier2_frame_ts: float = -1.0
+    suppressed_count: int = 0
+    corroborate_hold_count: int = 0
+    escalated_count: int = 0
+    cooldown_skip_count: int = 0
+    stale_dropped_count: int = 0
+    policy_suppressed_count: int = 0
+    active_alert_count: int = 0
 
 
 class RoutingDecision(BaseModel):
@@ -100,6 +107,26 @@ class DecisionEngine:
     def reset_stream(self, drone_id: str) -> None:
         """Clear accumulated temporal state for a stopped or reset stream."""
         self._states.pop(drone_id, None)
+
+    def get_counts_snapshot(self, drone_id: str) -> dict[str, int]:
+        """Return cumulative System 1 & Tier 2 decision counters for a stream."""
+        state = self.get_state(drone_id)
+        total_tier1 = (
+            state.suppressed_count
+            + state.corroborate_hold_count
+            + state.escalated_count
+            + state.cooldown_skip_count
+        )
+        return {
+            "total_evaluated": total_tier1,
+            "suppressed": state.suppressed_count,
+            "corroborate_hold": state.corroborate_hold_count,
+            "escalated": state.escalated_count,
+            "cooldown_skip": state.cooldown_skip_count,
+            "stale_dropped": state.stale_dropped_count,
+            "policy_suppressed": state.policy_suppressed_count,
+            "active_alerts": state.active_alert_count,
+        }
 
     def _prune_and_record(
         self,
@@ -178,6 +205,7 @@ class DecisionEngine:
         # 0. Circuit breaker fail-open path
         if triage.tier1_decision == "CIRCUIT_BREAKER_BYPASS":
             if state.tier2_in_flight:
+                state.cooldown_skip_count += 1
                 return RoutingDecision(
                     action=RoutingAction.COOLDOWN_SKIP,
                     should_escalate=False,
@@ -188,6 +216,7 @@ class DecisionEngine:
                     window_hits=0,
                     window_size=len(state.observations),
                 )
+            state.escalated_count += 1
             return RoutingDecision(
                 action=RoutingAction.CIRCUIT_BREAKER_BYPASS,
                 should_escalate=True,
@@ -215,6 +244,7 @@ class DecisionEngine:
                 window_capacity=config.corroboration_window,
             )
             hits = sum(1 for o in state.observations if o.is_band1_or_higher)
+            state.suppressed_count += 1
             return RoutingDecision(
                 action=RoutingAction.SUPPRESS,
                 should_escalate=False,
@@ -244,6 +274,7 @@ class DecisionEngine:
         if is_band2:
             shed_reason = self._check_anti_snowball_gate(state, triage, config, wall)
             if shed_reason is not None:
+                state.cooldown_skip_count += 1
                 return RoutingDecision(
                     action=RoutingAction.COOLDOWN_SKIP,
                     should_escalate=False,
@@ -254,6 +285,7 @@ class DecisionEngine:
                     window_hits=hits,
                     window_size=win_len,
                 )
+            state.escalated_count += 1
             return RoutingDecision(
                 action=RoutingAction.ESCALATE_IMMEDIATE,
                 should_escalate=True,
@@ -267,6 +299,7 @@ class DecisionEngine:
 
         # 3. Band 1: Ambiguous band -> require k-of-n temporal corroboration
         if hits < config.corroboration_hits:
+            state.corroborate_hold_count += 1
             return RoutingDecision(
                 action=RoutingAction.CORROBORATE_HOLD,
                 should_escalate=False,
@@ -280,6 +313,7 @@ class DecisionEngine:
 
         shed_reason = self._check_anti_snowball_gate(state, triage, config, wall)
         if shed_reason is not None:
+            state.cooldown_skip_count += 1
             return RoutingDecision(
                 action=RoutingAction.COOLDOWN_SKIP,
                 should_escalate=False,
@@ -293,6 +327,7 @@ class DecisionEngine:
 
         # Clear corroborated buffer once promoted to Tier 2 so subsequent waves corroborate cleanly
         state.observations.clear()
+        state.escalated_count += 1
         return RoutingDecision(
             action=RoutingAction.ESCALATE_CORROBORATED,
             should_escalate=True,
@@ -339,6 +374,7 @@ class DecisionEngine:
                 if video_timestamp_sec < state.latest_tier2_frame_ts - 5.0:
                     state.latest_tier2_frame_ts = video_timestamp_sec
                 elif video_timestamp_sec < state.latest_tier2_frame_ts:
+                    state.stale_dropped_count += 1
                     return DispatchDecision(
                         action=DispatchAction.STALE_WATERMARK_DROPPED,
                         trigger_alert=False,
@@ -373,6 +409,7 @@ class DecisionEngine:
             effective_cutoff = round(base_cutoff * 0.90, 4)
 
         if analysis.confidence_score >= effective_cutoff:
+            state.active_alert_count += 1
             return DispatchDecision(
                 action=DispatchAction.ACTIVE_ALERT,
                 trigger_alert=True,
@@ -383,6 +420,7 @@ class DecisionEngine:
                 ),
             )
 
+        state.policy_suppressed_count += 1
         return DispatchDecision(
             action=DispatchAction.SUPPRESSED_BELOW_POLICY,
             trigger_alert=False,

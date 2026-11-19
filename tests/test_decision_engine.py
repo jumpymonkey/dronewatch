@@ -15,9 +15,11 @@ from dronewatch.models.events import (
     ThreatLevel,
 )
 from dronewatch.models.triage import (
+    DecisionTelemetryEvent,
     DispatchAction,
     GemmaTriageResponse,
     RoutingAction,
+    TriageClassProbabilities,
     TriageVerdict,
 )
 from dronewatch.models.workflow_config import TriageMode, WorkflowConfig
@@ -425,3 +427,110 @@ async def test_stream_processor_end_to_end_corroboration_to_gemini() -> None:
     assert emitted[0].routing_action == str(RoutingAction.ESCALATE_CORROBORATED)
     assert emitted[0].dispatch_action == str(DispatchAction.ACTIVE_ALERT)
     assert emitted[0].threat_level == ThreatLevel.MEDIUM
+
+
+@pytest.mark.asyncio
+async def test_stream_processor_emits_live_decision_telemetry_and_counts() -> None:
+    """Verify every evaluated frame emits DecisionTelemetryEvent with calibrated stats & counts."""
+    wf = WorkflowConfig(
+        enable_tier1_gemma=True,
+        triage_mode=TriageMode.DECISION_FRAMEWORK,
+        suppress_threshold=0.25,
+        gemma_triage_threshold=0.65,
+        dispatch_confidence_threshold=0.75,
+        corroboration_hits=2,
+        corroboration_window=3,
+    )
+
+    def _calibrated_triage(p_threat: float, verdict: TriageVerdict) -> GemmaTriageResponse:
+        p_safe = round(1.0 - p_threat, 4)
+        return GemmaTriageResponse(
+            escalate_to_gemini=p_threat >= 0.65,
+            anomaly_detected=p_threat >= 0.25,
+            triage_score=p_threat,
+            tier1_latency_ms=132.4,
+            tier1_decision="SUSPICIOUS" if p_threat >= 0.25 else "BENIGN",
+            verdict=verdict,
+            class_probabilities=TriageClassProbabilities(
+                safe=p_safe,
+                suspicious=p_threat,
+                critical=0.0,
+                entropy=0.28,
+                calibrated_from_logprobs=True,
+            ),
+            tags=[verdict.lower(), "logprob_calibrated"],
+            raw_output=verdict.value,
+            model_name="google/gemma-4-E4B-it",
+        )
+
+    mock_gemma = MagicMock(spec=GemmaTriageClient)
+    mock_gemma.triage_frame = AsyncMock(
+        side_effect=[
+            _calibrated_triage(0.02, TriageVerdict.SAFE),  # Frame 1: SUPPRESS
+            _calibrated_triage(0.42, TriageVerdict.SUSPICIOUS),  # Frame 2: CORROBORATE_HOLD
+            _calibrated_triage(0.51, TriageVerdict.SUSPICIOUS),  # Frame 3: ESCALATE_CORROBORATED
+        ]
+    )
+
+    mock_gemini = MagicMock(spec=GeminiVideoAnalyzer)
+    mock_gemini.analyze_frame = AsyncMock(
+        return_value=AnalysisResult(
+            suspicious_activity_detected=True,
+            threat_level=ThreatLevel.HIGH,
+            category=IncidentCategory.PERIMETER_BREACH,
+            summary="Intruder scaling south fence.",
+            description="Individual climbing south perimeter fence.",
+            confidence_score=0.91,
+            bounding_boxes=[],
+        )
+    )
+
+    decision_events: list[DecisionTelemetryEvent] = []
+
+    async def capture_decision(ev: DecisionTelemetryEvent) -> None:
+        decision_events.append(ev)
+
+    proc = DroneStreamProcessor(
+        config=DroneStreamConfig(
+            drone_id="Drone-HUD",
+            stream_url="/dev/null",
+            zone_name="South Fence",
+        ),
+        settings=Settings(enable_tier1_gemma=True),
+        analyzer=mock_gemini,
+        gemma_client=mock_gemma,
+        decision_callback=capture_decision,
+        config_provider=lambda: wf,
+    )
+
+    await proc._analyze_frame(b"f1", video_timestamp_sec=10.0)
+    await proc._analyze_frame(b"f2", video_timestamp_sec=11.0)
+    await proc._analyze_frame(b"f3", video_timestamp_sec=12.0)
+
+    # Frame 1 -> SUPPRESS, Frame 2 -> CORROBORATE_HOLD,
+    # Frame 3 -> ESCALATE_CORROBORATED (initial) + ESCALATE_CORROBORATED -> ACTIVE_ALERT (final)
+    assert len(decision_events) == 4
+    assert decision_events[0].routing_action == "SUPPRESS"
+    assert decision_events[0].calibrated_from_logprobs is True
+    assert decision_events[0].counts["suppressed"] == 1
+
+    assert decision_events[1].routing_action == "CORROBORATE_HOLD"
+    assert decision_events[1].window_hits == 1
+    assert decision_events[1].counts["corroborate_hold"] == 1
+
+    assert decision_events[2].routing_action == "ESCALATE_CORROBORATED"
+    assert decision_events[2].dispatch_action is None
+
+    final_ev = decision_events[3]
+    assert final_ev.routing_action == "ESCALATE_CORROBORATED"
+    assert final_ev.dispatch_action == "ACTIVE_ALERT"
+    assert final_ev.counts == {
+        "total_evaluated": 3,
+        "suppressed": 1,
+        "corroborate_hold": 1,
+        "escalated": 1,
+        "cooldown_skip": 0,
+        "stale_dropped": 0,
+        "policy_suppressed": 0,
+        "active_alerts": 1,
+    }

@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,7 @@ from dronewatch.models.events import (
     StreamStatus,
     ThreatLevel,
 )
+from dronewatch.models.triage import DecisionTelemetryEvent
 from dronewatch.models.workflow_config import WorkflowConfig, WorkflowConfigUpdate
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
 from dronewatch.services.gemma_client import GemmaTriageClient
@@ -50,6 +51,7 @@ connected_websockets: list[WebSocket] = []
 
 # In-memory telemetry log of recent AI responses across triage and escalation
 ai_responses_history: deque[dict[str, Any]] = deque(maxlen=200)
+latest_decision_telemetry: dict[str, dict[str, Any]] = {}
 
 FALLBACK_VIDEO_URL = (
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
@@ -106,6 +108,54 @@ async def broadcast_incident(event: IncidentEvent) -> None:
     # avoid polluting database with routine 10s heartbeats
     if event.threat_level != ThreatLevel.NONE and event.category != IncidentCategory.CLEAR:
         await db_manager.log_incident(event)
+
+    payload = event.model_dump_json()
+    disconnected: list[WebSocket] = []
+
+    for ws in connected_websockets:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            disconnected.append(ws)
+
+    for ws in disconnected:
+        if ws in connected_websockets:
+            connected_websockets.remove(ws)
+
+
+async def broadcast_decision_telemetry(event: DecisionTelemetryEvent) -> None:
+    """Broadcast real-time System 1 Decision Engine telemetry to WebSocket clients."""
+    snapshot = event.model_dump(mode="json")
+    latest_decision_telemetry[event.drone_id] = snapshot
+
+    # Surface held, cooldown-shed, or stale-dropped decisions in Admin AI Telemetry Log
+    if (
+        event.routing_action in ("CORROBORATE_HOLD", "COOLDOWN_SKIP")
+        or event.dispatch_action == "STALE_WATERMARK_DROPPED"
+    ):
+        ai_responses_history.append(
+            {
+                "event_id": str(uuid4()),
+                "timestamp": event.timestamp.isoformat(),
+                "drone_id": event.drone_id,
+                "source_tier": "triage",
+                "source_model": "gemma",
+                "model_name": event.model_name,
+                "threat_level": "NONE",
+                "category": "CLEAR",
+                "confidence_score": round(event.p_threat, 3),
+                "scene_summary": (
+                    f"System 1 [{event.verdict}] P(threat)={event.p_threat:.3f} "
+                    f"H={event.entropy:.2f} hits={event.window_hits}/{event.window_size} "
+                    f"({event.reason})"
+                ),
+                "raw_response": event.raw_output,
+                "latency_ms": event.latency_ms,
+                "video_timestamp_formatted": event.video_timestamp_formatted,
+                "routing_action": event.routing_action,
+                "dispatch_action": event.dispatch_action,
+            }
+        )
 
     payload = event.model_dump_json()
     disconnected: list[WebSocket] = []
@@ -261,6 +311,7 @@ async def register_stream(req: StreamRegisterRequest) -> DroneStreamConfig:
         gemma_client=gemma_client,
         event_callback=broadcast_incident,
         config_provider=db_manager.get_workflow_config,
+        decision_callback=broadcast_decision_telemetry,
     )
     stream_processors[req.drone_id] = processor
     await processor.start()
@@ -279,6 +330,7 @@ async def unregister_stream(drone_id: str) -> dict[str, Any]:
         await processor.stop()
 
     active_streams.pop(drone_id, None)
+    latest_decision_telemetry.pop(drone_id, None)
     logger.info("Unregistered stream for drone %s", drone_id)
     return {
         "status": "success",
@@ -525,6 +577,12 @@ async def get_ai_responses(drone_id: str | None = None, limit: int = 50) -> list
     if drone_id:
         responses = [r for r in responses if r.get("drone_id") == drone_id]
     return responses[-limit:][::-1]
+
+
+@app.get("/api/decision/telemetry")
+async def get_decision_telemetry() -> dict[str, dict[str, Any]]:
+    """Retrieve latest System 1 Decision Engine telemetry snapshot per active drone."""
+    return dict(latest_decision_telemetry)
 
 
 @app.websocket("/ws/alerts")

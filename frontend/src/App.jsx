@@ -12,6 +12,7 @@ export default function App() {
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [alerts, setAlerts] = useState([]);
   const [telemetry, setTelemetry] = useState({});
+  const [decisionTelemetry, setDecisionTelemetry] = useState({});
 
   // Fetch active streams from backend on mount
   const fetchStreams = async () => {
@@ -26,8 +27,21 @@ export default function App() {
     }
   };
 
+  const fetchDecisionTelemetry = async () => {
+    try {
+      const res = await fetch('/api/decision/telemetry');
+      if (res.ok) {
+        const data = await res.json();
+        setDecisionTelemetry(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch decision telemetry:', err);
+    }
+  };
+
   useEffect(() => {
     fetchStreams();
+    fetchDecisionTelemetry();
 
     let ws = null;
     let reconnectTimeout = null;
@@ -44,6 +58,17 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const incident = JSON.parse(event.data);
+
+          // Discriminate System 1 per-frame Decision Engine telemetry from IncidentEvent
+          if (incident.event_type === 'decision_telemetry') {
+            if (incident.drone_id) {
+              setDecisionTelemetry((prev) => ({
+                ...prev,
+                [incident.drone_id]: incident,
+              }));
+            }
+            return;
+          }
 
           // Update real-time Gemini telemetry HUD for this drone ID
           if (incident.drone_id) {
@@ -110,14 +135,22 @@ export default function App() {
   };
 
   const handleUnregisterStream = async (droneId) => {
+    const clearLocal = () => {
+      setStreams((prev) => prev.filter((s) => s.drone_id !== droneId));
+      setDecisionTelemetry((prev) => {
+        const next = { ...prev };
+        delete next[droneId];
+        return next;
+      });
+    };
     try {
       const res = await fetch(`/api/streams/${droneId}`, { method: 'DELETE' });
       if (res.ok) {
-        setStreams((prev) => prev.filter((s) => s.drone_id !== droneId));
+        clearLocal();
       }
     } catch (err) {
       console.error('Error unregistering stream:', err);
-      setStreams((prev) => prev.filter((s) => s.drone_id !== droneId));
+      clearLocal();
     }
   };
 
@@ -186,6 +219,7 @@ export default function App() {
           streams={streams}
           activeAlerts={alerts}
           telemetry={telemetry}
+          decisionTelemetry={decisionTelemetry}
           onUnregisterStream={handleUnregisterStream}
           onOpenRegisterModal={() => setIsRegisterModalOpen(true)}
         />

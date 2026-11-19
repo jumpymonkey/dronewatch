@@ -125,3 +125,54 @@ class GemmaTriageResponse(BaseModel):
         default=None,
         description="Identifier of the serving model engine",
     )
+
+
+class DecisionTelemetryEvent(BaseModel):
+    """Real-time System 1 Decision Engine telemetry broadcast per evaluated frame."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: Literal["decision_telemetry"] = Field(
+        default="decision_telemetry",
+        description="Discriminator distinguishing System 1 telemetry from IncidentEvent",
+    )
+    drone_id: str = Field(..., description="Reporting drone identifier")
+    timestamp: datetime = Field(..., description="UTC timestamp of decision evaluation")
+    video_timestamp_formatted: str | None = Field(
+        default=None, description="Formatted video timecode e.g. 02:42"
+    )
+    triage_mode: str = Field(
+        default="DECISION_FRAMEWORK",
+        description="Active Tier 1 triage mode (DECISION_FRAMEWORK or KEYWORD_LEGACY)",
+    )
+    model_name: str | None = Field(default=None, description="Tier 1 serving model identifier")
+    verdict: TriageVerdict = Field(default=TriageVerdict.SAFE, description="System 1 choice token")
+    p_threat: float = Field(..., ge=0.0, le=1.0, description="Calibrated P(threat)")
+    p_safe: float = Field(default=1.0, ge=0.0, le=1.0, description="Calibrated P(SAFE)")
+    p_suspicious: float = Field(default=0.0, ge=0.0, le=1.0, description="Calibrated P(SUSPICIOUS)")
+    p_critical: float = Field(default=0.0, ge=0.0, le=1.0, description="Calibrated P(CRITICAL)")
+    entropy: float = Field(default=0.0, ge=0.0, le=1.0, description="Normalized Shannon entropy")
+    calibrated_from_logprobs: bool = Field(
+        default=False, description="True when calibrated from exact vLLM top_logprobs"
+    )
+    routing_action: str = Field(..., description="Tier 1 RoutingAction")
+    dispatch_action: str | None = Field(
+        default=None, description="Optional Tier 2 DispatchAction once escalation completes"
+    )
+    reason: str = Field(..., description="Deterministic audit reason for decision")
+    window_hits: int = Field(default=0, ge=0, description="Active Band 1+ hits in ring buffer")
+    window_size: int = Field(default=0, ge=0, description="Current ring buffer occupancy")
+    corroboration_hits_required: int = Field(
+        default=2, ge=1, description="Configured k hits required to corroborate"
+    )
+    corroboration_window_capacity: int = Field(
+        default=3, ge=1, description="Configured n window capacity"
+    )
+    suppress_threshold: float = Field(default=0.25, ge=0.0, le=1.0, description="Band 0 ceiling")
+    escalate_threshold: float = Field(default=0.50, ge=0.0, le=1.0, description="Band 2 cutoff")
+    latency_ms: float = Field(default=0.0, ge=0.0, description="Tier 1 latency in milliseconds")
+    raw_output: str | None = Field(default=None, description="Raw model token output")
+    counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Cumulative per-stream decision counters",
+    )
