@@ -5,7 +5,7 @@ import os
 from pydantic import ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
 
-from dronewatch.models.workflow_config import TriageMode
+from dronewatch.models.workflow_config import DEFAULT_SYSTEM1_DECISION_PROMPT, TriageMode
 
 # Disable mTLS client cert provider helper which causes status code -11 errors on Linux workstations
 os.environ["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
@@ -103,11 +103,8 @@ class Settings(BaseSettings):
         description="HTTP timeout for Tier 1 triage before circuit breaker trips open",
     )
     gemma_triage_prompt: str = Field(
-        default=(
-            "detect campus security anomalies, unauthorized persons, perimeter breaches, "
-            "or vehicles and equipment on pedestrian walkways; answer safe or alert"
-        ),
-        description="Zero-shot prompt sent to Gemma 4 for front-line triage",
+        default=DEFAULT_SYSTEM1_DECISION_PROMPT,
+        description="System 1 Choice rubric prompt sent to Gemma 4 for front-line triage",
     )
     gemma_scene_description_interval_seconds: float = Field(
         default=10.0,

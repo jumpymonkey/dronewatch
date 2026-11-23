@@ -38,155 +38,12 @@ const GEMMA_MODELS = [
   { id: 'google/gemma-2-2b-it', label: 'google/gemma-2-2b-it (Lightweight 2B Edge)' },
 ];
 
-const DEFAULT_ALERT_KEYWORDS = [
-  'alert',
-  'suspicious',
-  'anomalous',
-  'anomaly',
-  'intruder',
-  'unauthorized',
-  'trespass',
-  'trespassing',
-  'breach',
-  'danger',
-  'hazard',
-  'threat',
-  'weapon',
-  'climbing',
-  'fire',
-  'smoke',
-  'loitering',
-  'equipment',
-  'machinery',
-  'vehicle',
-  'cart',
-  'lift',
-  'crane',
-  'obstruction',
-  'blocked',
-];
-
-const DEFAULT_BENIGN_KEYWORDS = [
-  'safe',
-  'normal',
-  'benign',
-  'clear',
-  'empty',
-  'routine',
-  'authorized',
-];
-
-const arraysEqual = (a, b) => {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.length !== b.length) return false;
-  return a.every((val, idx) => val === b[idx]);
-};
-
-function KeywordTagEditor({
-  title,
-  subtitle,
-  tags = [],
-  onChange,
-  onResetDefaults,
-  chipType = 'alert',
-  placeholder = 'Add keyword...',
-}) {
-  const [inputValue, setInputValue] = useState('');
-
-  const handleAdd = () => {
-    const trimmed = inputValue.trim().toLowerCase();
-    if (!trimmed) return;
-    if (!tags.includes(trimmed)) {
-      onChange([...tags, trimmed]);
-    }
-    setInputValue('');
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' || e.key === ',') {
-      e.preventDefault();
-      handleAdd();
-    }
-  };
-
-  const handleRemove = (tagToRemove) => {
-    onChange(tags.filter((t) => t !== tagToRemove));
-  };
-
-  return (
-    <div className="keyword-editor-container">
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '0.5rem',
-        }}
-      >
-        <div>
-          <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-            {title}
-          </span>
-          {subtitle && (
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0.15rem 0 0 0' }}>
-              {subtitle}
-            </p>
-          )}
-        </div>
-        {onResetDefaults && (
-          <button
-            type="button"
-            className="btn-ghost"
-            style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
-            onClick={onResetDefaults}
-          >
-            Reset Defaults
-          </button>
-        )}
-      </div>
-
-      <div className="keyword-chips-wrap">
-        {tags.map((tag) => (
-          <span
-            key={tag}
-            className={`keyword-chip ${chipType === 'alert' ? 'alert-chip' : 'benign-chip'}`}
-          >
-            <span>{tag}</span>
-            <button
-              type="button"
-              className="keyword-chip-remove"
-              onClick={() => handleRemove(tag)}
-              title={`Remove "${tag}"`}
-            >
-              <X size={12} />
-            </button>
-          </span>
-        ))}
-      </div>
-
-      <div className="keyword-input-row">
-        <input
-          type="text"
-          className="keyword-input-field"
-          placeholder={placeholder}
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        <button
-          type="button"
-          className="btn-secondary"
-          style={{ padding: '0.45rem 0.8rem', fontSize: '0.8rem' }}
-          onClick={handleAdd}
-          disabled={!inputValue.trim()}
-        >
-          Add
-        </button>
-      </div>
-    </div>
-  );
-}
+const DEFAULT_SYSTEM1_PROMPT =
+  'Evaluate this campus security drone frame. Classify into exactly one label:\n' +
+  '- SAFE: Normal routine campus scene, empty area, or authorized walkway use.\n' +
+  '- SUSPICIOUS: Ambiguous motion, unattended object, loitering, or walkway obstruction.\n' +
+  '- CRITICAL: Active perimeter breach, intruder climbing, weapon, fire, or imminent danger.\n' +
+  'Respond with one word only: SAFE, SUSPICIOUS, or CRITICAL.';
 
 export default function AdminView() {
   const [config, setConfig] = useState(null);
@@ -202,24 +59,27 @@ export default function AdminView() {
   const [selectedResponse, setSelectedResponse] = useState(null);
   const [copiedResponse, setCopiedResponse] = useState(false);
 
-  const normalizeConfig = (data) => ({
-    ...data,
-    triage_mode: 'DECISION_FRAMEWORK',
-    suppress_threshold: data.suppress_threshold ?? 0.25,
-    gemma_triage_threshold: data.gemma_triage_threshold ?? 0.5,
-    dispatch_confidence_threshold:
-      data.dispatch_confidence_threshold != null ? data.dispatch_confidence_threshold : null,
-    corroboration_hits: data.corroboration_hits ?? 2,
-    corroboration_window: data.corroboration_window ?? 3,
-    escalation_cooldown_seconds: data.escalation_cooldown_seconds ?? 3.0,
-    alert_keywords: data.alert_keywords || [...DEFAULT_ALERT_KEYWORDS],
-    benign_keywords: data.benign_keywords || [...DEFAULT_BENIGN_KEYWORDS],
-    ambiguity_policy: data.ambiguity_policy || 'FAIL_SAFE',
-    gemma_model: data.gemma_model || 'google/gemma-4-E2B-it',
-    gemma_timeout_seconds: data.gemma_timeout_seconds ?? 2.0,
-    vllm_temperature: data.vllm_temperature ?? 0.0,
-    vllm_max_tokens: data.vllm_max_tokens ?? 32,
-  });
+  const normalizeConfig = (data) => {
+    const rawSuppress = data.suppress_threshold ?? 0.25;
+    const rawEscalate = data.gemma_triage_threshold ?? 0.5;
+    const inverted = rawEscalate < rawSuppress;
+    return {
+      ...data,
+      triage_mode: 'DECISION_FRAMEWORK',
+      suppress_threshold: inverted ? 0.25 : rawSuppress,
+      gemma_triage_threshold: inverted ? 0.5 : rawEscalate,
+      dispatch_confidence_threshold:
+        data.dispatch_confidence_threshold != null ? data.dispatch_confidence_threshold : null,
+      corroboration_hits: data.corroboration_hits ?? 2,
+      corroboration_window: data.corroboration_window ?? 3,
+      escalation_cooldown_seconds: data.escalation_cooldown_seconds ?? 3.0,
+      ambiguity_policy: 'FAIL_SAFE',
+      gemma_model: data.gemma_model || 'google/gemma-4-E2B-it',
+      gemma_timeout_seconds: data.gemma_timeout_seconds ?? 2.0,
+      vllm_temperature: data.vllm_temperature ?? 0.0,
+      vllm_max_tokens: data.vllm_max_tokens ?? 32,
+    };
+  };
 
   const fetchConfig = async () => {
     setLoading(true);
@@ -279,11 +139,8 @@ export default function AdminView() {
       config.gemma_model !== initialConfig.gemma_model ||
       (config.gemma_service_url || '') !== (initialConfig.gemma_service_url || '') ||
       config.gemma_timeout_seconds !== initialConfig.gemma_timeout_seconds ||
-      config.ambiguity_policy !== initialConfig.ambiguity_policy ||
       config.vllm_temperature !== initialConfig.vllm_temperature ||
-      config.vllm_max_tokens !== initialConfig.vllm_max_tokens ||
-      !arraysEqual(config.alert_keywords, initialConfig.alert_keywords) ||
-      !arraysEqual(config.benign_keywords, initialConfig.benign_keywords));
+      config.vllm_max_tokens !== initialConfig.vllm_max_tokens);
 
   const handleSave = async (e) => {
     if (e) e.preventDefault();
@@ -313,9 +170,7 @@ export default function AdminView() {
       gemma_model: config.gemma_model,
       gemma_service_url: config.gemma_service_url?.trim() || null,
       gemma_timeout_seconds: parseFloat(config.gemma_timeout_seconds),
-      alert_keywords: config.alert_keywords || [],
-      benign_keywords: config.benign_keywords || [],
-      ambiguity_policy: config.ambiguity_policy || 'FAIL_SAFE',
+      ambiguity_policy: 'FAIL_SAFE',
       vllm_temperature: parseFloat(config.vllm_temperature),
       vllm_max_tokens: parseInt(config.vllm_max_tokens, 10),
     };
@@ -524,21 +379,23 @@ export default function AdminView() {
 
             <div className="form-group">
               <div className="label-with-hint">
-                <label htmlFor="gemma-triage-prompt">Triage Policy Criteria Prompt</label>
+                <label htmlFor="gemma-triage-prompt">
+                  System 1 Choice Rubric Prompt (SAFE / SUSPICIOUS / CRITICAL)
+                </label>
                 <span className="hint-text">
-                  Campus threat policy evaluated by Gemma 4 on every motion candidate
+                  Constrained 3-class rubric evaluated by Gemma 4 with vLLM guided_choice &amp; top_logprobs
                 </span>
               </div>
               <textarea
                 id="gemma-triage-prompt"
-                rows={3}
+                rows={5}
                 className="admin-textarea mono-font"
                 value={config?.gemma_triage_prompt || ''}
                 disabled={!config?.enable_tier1_gemma}
                 onChange={(e) =>
                   setConfig((prev) => ({ ...prev, gemma_triage_prompt: e.target.value }))
                 }
-                placeholder="detect campus security anomalies, unauthorized persons, or perimeter breaches; answer safe or alert"
+                placeholder={DEFAULT_SYSTEM1_PROMPT}
               />
             </div>
           </div>
@@ -559,7 +416,7 @@ export default function AdminView() {
                     {(config?.suppress_threshold ?? 0.25).toFixed(2)}
                   </label>
                   <span className="hint-text">
-                    Frames below ceiling drop immediately at zero API cost
+                    Frames below ceiling drop immediately at zero API cost (Default: 0.25)
                   </span>
                 </div>
                 <div className="threshold-control-row">
@@ -571,12 +428,17 @@ export default function AdminView() {
                     step="0.05"
                     className="threshold-slider"
                     value={config?.suppress_threshold ?? 0.25}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const nextSuppress = parseFloat(e.target.value);
                       setConfig((prev) => ({
                         ...prev,
-                        suppress_threshold: parseFloat(e.target.value),
-                      }))
-                    }
+                        suppress_threshold: nextSuppress,
+                        gemma_triage_threshold: Math.max(
+                          prev.gemma_triage_threshold ?? 0.5,
+                          nextSuppress
+                        ),
+                      }));
+                    }}
                   />
                   <div className="threshold-value-badge">
                     {(config?.suppress_threshold ?? 0.25).toFixed(2)}
@@ -591,7 +453,9 @@ export default function AdminView() {
                     {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
                   </label>
                   <span className="hint-text">
-                    High-confidence candidates escalate on first frame (Band 1 sits between Band 0 &amp; 2)
+                    Default: 0.50 &bull; Band 1 Corroboration Interval: [
+                    {(config?.suppress_threshold ?? 0.25).toFixed(2)},{' '}
+                    {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)})
                   </span>
                 </div>
                 <div className="threshold-control-row">
@@ -603,12 +467,17 @@ export default function AdminView() {
                     step="0.05"
                     className="threshold-slider"
                     value={config?.gemma_triage_threshold ?? 0.5}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const nextEscalate = parseFloat(e.target.value);
                       setConfig((prev) => ({
                         ...prev,
-                        gemma_triage_threshold: parseFloat(e.target.value),
-                      }))
-                    }
+                        gemma_triage_threshold: nextEscalate,
+                        suppress_threshold: Math.min(
+                          prev.suppress_threshold ?? 0.25,
+                          nextEscalate
+                        ),
+                      }));
+                    }}
                   />
                   <div className="threshold-value-badge">
                     {(config?.gemma_triage_threshold ?? 0.5).toFixed(2)}
@@ -856,99 +725,26 @@ export default function AdminView() {
             </div>
           </div>
 
-          {/* Ambiguity Policy Cards */}
+          {/* Mandatory FAIL_SAFE Unclassified Fallback Policy Banner */}
           <div className="form-group" style={{ marginTop: '1.25rem' }}>
             <div className="label-with-hint">
-              <label>Triage Ambiguity & Unclassified Handling Policy</label>
+              <label>Unclassified &amp; Circuit-Breaker Safety Policy</label>
               <span className="hint-text">
-                Determines action when Gemma 4 response contains neither explicit alert nor benign verdict
+                Mandatory fail-safe behavior when logprobs or constrained choice tokens are unavailable
               </span>
             </div>
-            <div className="policy-cards">
-              <div
-                className={`policy-card ${
-                  (config?.ambiguity_policy || 'FAIL_SAFE') === 'FAIL_SAFE'
-                    ? 'selected-fail-safe'
-                    : ''
-                }`}
-                onClick={() =>
-                  setConfig((prev) => ({ ...prev, ambiguity_policy: 'FAIL_SAFE' }))
-                }
-              >
-                <div className="policy-card-header">
-                  <span className="policy-title">FAIL_SAFE (Recommended)</span>
-                  <div className="target-radio-indicator">
-                    <div
-                      className="radio-inner"
-                      style={{
-                        opacity:
-                          (config?.ambiguity_policy || 'FAIL_SAFE') === 'FAIL_SAFE' ? 1 : 0,
-                      }}
-                    />
-                  </div>
-                </div>
-                <p className="policy-desc">
-                  Treat ambiguous or verbose output as suspicious (score 0.80). Automatically escalates
-                  the frame to Tier 2 Gemini for verification, preventing missed hazards.
-                </p>
+            <div className="policy-card selected-fail-safe" style={{ cursor: 'default' }}>
+              <div className="policy-card-header">
+                <span className="policy-title">
+                  FAIL_SAFE (Active &bull; Zero Keyword Configuration Required)
+                </span>
               </div>
-
-              <div
-                className={`policy-card ${
-                  config?.ambiguity_policy === 'CONSERVATIVE' ? 'selected-conservative' : ''
-                }`}
-                onClick={() =>
-                  setConfig((prev) => ({ ...prev, ambiguity_policy: 'CONSERVATIVE' }))
-                }
-              >
-                <div className="policy-card-header">
-                  <span className="policy-title">CONSERVATIVE (Cost Saver)</span>
-                  <div className="target-radio-indicator">
-                    <div
-                      className="radio-inner"
-                      style={{
-                        opacity: config?.ambiguity_policy === 'CONSERVATIVE' ? 1 : 0,
-                      }}
-                    />
-                  </div>
-                </div>
-                <p className="policy-desc">
-                  Treat unclassified output as benign (score 0.20) unless explicit alert keywords appear.
-                  Reduces Gemini API calls in high-traffic or benign environments.
-                </p>
-              </div>
+              <p className="policy-desc">
+                System 1 triage relies on calibrated vLLM logprobs over SAFE / SUSPICIOUS / CRITICAL
+                rather than fragile keyword lists. Any uncalibrated, ambiguous, or timed-out Tier 1
+                response unconditionally fails safe to Tier 2 verification so hazards are never missed.
+              </p>
             </div>
-          </div>
-
-          {/* Dynamic Keyword Tag Editors */}
-          <div className="admin-grid-2col" style={{ marginTop: '1.25rem' }}>
-            <KeywordTagEditor
-              title="Alert Trigger Keywords"
-              subtitle="Tokens indicating suspicious activity, equipment, hazards, or security threats"
-              tags={config?.alert_keywords || []}
-              chipType="alert"
-              placeholder="e.g. equipment, forklift, hazard..."
-              onChange={(newTags) =>
-                setConfig((prev) => ({ ...prev, alert_keywords: newTags }))
-              }
-              onResetDefaults={() =>
-                setConfig((prev) => ({ ...prev, alert_keywords: [...DEFAULT_ALERT_KEYWORDS] }))
-              }
-            />
-
-            <KeywordTagEditor
-              title="Benign Classification Keywords"
-              subtitle="Tokens indicating normal, safe, nominal, or routine campus conditions"
-              tags={config?.benign_keywords || []}
-              chipType="benign"
-              placeholder="e.g. routine, nominal, normal..."
-              onChange={(newTags) =>
-                setConfig((prev) => ({ ...prev, benign_keywords: newTags }))
-              }
-              onResetDefaults={() =>
-                setConfig((prev) => ({ ...prev, benign_keywords: [...DEFAULT_BENIGN_KEYWORDS] }))
-              }
-            />
           </div>
         </div>
 

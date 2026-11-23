@@ -550,3 +550,24 @@ def test_keyword_legacy_triage_mode_is_rejected(legacy_value: str) -> None:
 
     with pytest.raises(ValidationError):
         WorkflowConfigUpdate(triage_mode=legacy_value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("retired_policy", ["CONSERVATIVE", "conservative"])
+def test_conservative_ambiguity_policy_is_rejected_and_default_prompt_is_system1(
+    retired_policy: str,
+) -> None:
+    """Verify CONSERVATIVE ambiguity policy is rejected and default prompt uses System 1 rubric."""
+    from dronewatch.models.workflow_config import DEFAULT_GEMMA_TRIAGE_PROMPT, AmbiguityPolicy
+
+    with pytest.raises(ValueError):
+        AmbiguityPolicy(retired_policy)
+
+    with pytest.raises(ValidationError):
+        WorkflowConfig(ambiguity_policy=retired_policy)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        WorkflowConfigUpdate(ambiguity_policy=retired_policy)  # type: ignore[arg-type]
+
+    assert "answer safe or alert" not in DEFAULT_GEMMA_TRIAGE_PROMPT.lower()
+    for choice in ("SAFE", "SUSPICIOUS", "CRITICAL"):
+        assert choice in DEFAULT_GEMMA_TRIAGE_PROMPT

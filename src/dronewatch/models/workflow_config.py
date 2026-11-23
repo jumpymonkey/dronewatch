@@ -5,11 +5,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-DEFAULT_GEMMA_TRIAGE_PROMPT: str = (
-    "detect campus security anomalies, unauthorized persons, perimeter breaches, "
-    "or vehicles and equipment on pedestrian walkways; answer safe or alert"
-)
-
 DEFAULT_SYSTEM1_DECISION_PROMPT: str = (
     "Evaluate this campus security drone frame. Classify into exactly one label:\n"
     "- SAFE: Normal routine campus scene, empty area, or authorized walkway use.\n"
@@ -17,6 +12,8 @@ DEFAULT_SYSTEM1_DECISION_PROMPT: str = (
     "- CRITICAL: Active perimeter breach, intruder climbing, weapon, fire, or imminent danger.\n"
     "Respond with one word only: SAFE, SUSPICIOUS, or CRITICAL."
 )
+
+DEFAULT_GEMMA_TRIAGE_PROMPT: str = DEFAULT_SYSTEM1_DECISION_PROMPT
 
 DEFAULT_ALERT_KEYWORDS: tuple[str, ...] = (
     "alert",
@@ -98,10 +95,9 @@ class EscalationTarget(StrEnum):
 
 
 class AmbiguityPolicy(StrEnum):
-    """Handling policy when front-line triage output is ambiguous or unclassified."""
+    """Handling policy when uncalibrated fallback output is ambiguous (mandatory FAIL_SAFE)."""
 
     FAIL_SAFE = "FAIL_SAFE"
-    CONSERVATIVE = "CONSERVATIVE"
 
 
 class TriageMode(StrEnum):

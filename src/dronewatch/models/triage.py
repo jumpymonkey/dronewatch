@@ -66,10 +66,15 @@ class GemmaTriageRequest(BaseModel):
     image_base64: str = Field(..., description="Base64 encoded JPEG/PNG frame payload")
     prompt: str = Field(
         default=(
-            "detect campus security anomalies, unauthorized persons, "
-            "or perimeter breaches; answer safe or alert"
+            "Evaluate this campus security drone frame. Classify into exactly one label:\n"
+            "- SAFE: Normal routine campus scene, empty area, or authorized walkway use.\n"
+            "- SUSPICIOUS: Ambiguous motion, unattended object, loitering, "
+            "or walkway obstruction.\n"
+            "- CRITICAL: Active perimeter breach, intruder climbing, weapon, fire, "
+            "or imminent danger.\n"
+            "Respond with one word only: SAFE, SUSPICIOUS, or CRITICAL."
         ),
-        description="Zero-shot text prompt guiding front-line Gemma 4 triage",
+        description="System 1 Choice rubric prompt guiding front-line Gemma 4 triage",
     )
 
 

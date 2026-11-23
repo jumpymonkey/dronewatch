@@ -53,19 +53,20 @@ def test_parse_triage_text_classifications(
     assert any(expected_tag in t for t in tags)
 
 
-def test_parse_triage_text_conservative_policy(gemma_settings: Settings) -> None:
-    """Verify CONSERVATIVE ambiguity policy suppresses unclassified frames below threshold."""
+def test_parse_triage_text_rejects_conservative_policy(gemma_settings: Settings) -> None:
+    """Verify retired CONSERVATIVE policy is rejected and unclassified text fails safe."""
     from dronewatch.models.workflow_config import AmbiguityPolicy
 
     client = GemmaTriageClient(gemma_settings)
-    is_alert, score, tags = client._parse_triage_text(
-        "unknown blurry motion",
-        ambiguity_policy=AmbiguityPolicy.CONSERVATIVE,
-    )
+    with pytest.raises(ValueError):
+        AmbiguityPolicy("CONSERVATIVE")
+    with pytest.raises(ValueError):
+        client._parse_triage_text("unknown blurry motion", ambiguity_policy="CONSERVATIVE")
 
-    assert is_alert is False
-    assert 0.15 <= score <= 0.25
-    assert "ambiguous_conservative" in tags
+    is_alert, score, tags = client._parse_triage_text("unknown blurry motion")
+    assert is_alert is True
+    assert score == pytest.approx(0.80)
+    assert "ambiguous_fail_safe" in tags
 
 
 def test_parse_deep_analysis_equipment_on_walkway_hazard(gemma_settings: Settings) -> None:

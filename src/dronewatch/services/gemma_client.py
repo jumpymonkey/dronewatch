@@ -382,11 +382,8 @@ class GemmaTriageClient:
             if benign_keywords is not None
             else list(BENIGN_KEYWORDS)
         )
-        policy = (
+        if ambiguity_policy is not None:
             AmbiguityPolicy(ambiguity_policy)
-            if ambiguity_policy is not None
-            else AmbiguityPolicy.FAIL_SAFE
-        )
 
         # Strip negated alert phrases ("no unauthorized persons", "no equipment") before matching
         unnegated = self._strip_negated_clauses(cleaned, active_alerts)
@@ -424,18 +421,21 @@ class GemmaTriageClient:
             tags = matched_benign if matched_benign else ["negated_threat_safe"]
             return False, 0.05, tags
 
-        # Handling policy when output is ambiguous / unclassified
-        if policy == AmbiguityPolicy.FAIL_SAFE:
-            return True, 0.80, ["unclassified", "ambiguous_fail_safe"]
-        return False, 0.20, ["unclassified", "ambiguous_conservative"]
+        # Mandatory FAIL_SAFE policy when uncalibrated output is ambiguous / unclassified
+        return True, 0.80, ["unclassified", "ambiguous_fail_safe"]
 
     @staticmethod
     def _build_system1_prompt(user_prompt: str | None) -> str:
         """Build System 1 Choice rubric prompt while honoring custom operator guidance."""
         if not user_prompt or not user_prompt.strip():
             return DEFAULT_SYSTEM1_DECISION_PROMPT
-        stripped = user_prompt.strip()
-        if stripped == DEFAULT_GEMMA_TRIAGE_PROMPT:
+        stripped = re.sub(
+            r"[;,\.\s]*answer\s+safe\s+or\s+alert\.?$",
+            "",
+            user_prompt.strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        if not stripped or stripped == DEFAULT_GEMMA_TRIAGE_PROMPT:
             return DEFAULT_SYSTEM1_DECISION_PROMPT
         if all(lbl in stripped.upper() for lbl in ("SAFE", "SUSPICIOUS", "CRITICAL")):
             return stripped

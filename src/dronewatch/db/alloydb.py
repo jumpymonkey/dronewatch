@@ -14,6 +14,7 @@ from dronewatch.models.workflow_config import (
     DEFAULT_ALERT_KEYWORDS,
     DEFAULT_BENIGN_KEYWORDS,
     DEFAULT_GEMMA_ESCALATION_PROMPT,
+    DEFAULT_GEMMA_TRIAGE_PROMPT,
     AmbiguityPolicy,
     EscalationTarget,
     TriageMode,
@@ -274,6 +275,40 @@ class AlloyDBManager:
                   )
                 """,
                 DEFAULT_GEMMA_ESCALATION_PROMPT,
+            )
+
+            # Migrate legacy v2 'answer safe or alert' triage prompt to System 1 Choice rubric
+            await conn.execute(
+                """
+                UPDATE workflow_settings
+                SET gemma_triage_prompt = $1
+                WHERE config_id = 'active'
+                  AND LOWER(gemma_triage_prompt) LIKE '%answer safe or alert%'
+                """,
+                DEFAULT_GEMMA_TRIAGE_PROMPT,
+            )
+
+            # Heal inverted v2->v3 thresholds (e.g. Band 2 = 0.10 < Band 0 = 0.25) & retired enums
+            await conn.execute(
+                """
+                UPDATE workflow_settings
+                SET suppress_threshold = CASE
+                        WHEN gemma_triage_threshold < suppress_threshold THEN 0.25
+                        ELSE suppress_threshold
+                    END,
+                    gemma_triage_threshold = CASE
+                        WHEN gemma_triage_threshold < suppress_threshold THEN 0.50
+                        ELSE gemma_triage_threshold
+                    END,
+                    triage_mode = 'DECISION_FRAMEWORK',
+                    ambiguity_policy = 'FAIL_SAFE'
+                WHERE config_id = 'active'
+                  AND (
+                    gemma_triage_threshold < suppress_threshold
+                    OR triage_mode != 'DECISION_FRAMEWORK'
+                    OR ambiguity_policy != 'FAIL_SAFE'
+                  )
+                """
             )
 
             logger.info("AlloyDB schema, vector extensions, and workflow settings verified.")
@@ -542,9 +577,7 @@ class AlloyDBManager:
                             benign_keywords=benign_kw
                             if benign_kw is not None
                             else list(DEFAULT_BENIGN_KEYWORDS),
-                            ambiguity_policy=AmbiguityPolicy(
-                                row["ambiguity_policy"] or AmbiguityPolicy.FAIL_SAFE
-                            ),
+                            ambiguity_policy=AmbiguityPolicy.FAIL_SAFE,
                             vllm_temperature=row["vllm_temperature"]
                             if row["vllm_temperature"] is not None
                             else 0.0,

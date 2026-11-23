@@ -175,7 +175,7 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 ### 4. Dynamic Workflow Administration Console (`AdminView.jsx`)
 - **Hot-Reloaded System 1 Controls:** Tune Band 0 (`suppress_threshold`) and Band 2 (`gemma_triage_threshold`) sliders in `DECISION_FRAMEWORK` mode, adjust `k-of-n` corroboration depth (`corroboration_hits` / `corroboration_window`), and configure the `escalation_cooldown_seconds` anti-snowball window.
 - **Independent Tier 2 Cutoff:** Toggle an independent `dispatch_confidence_threshold` or inherit the Tier 1 Band 2 cutoff.
-- **Model & Runtime Selectors:** Select Vertex AI Gemini models or vLLM Gemma models (including `google/gemma-4-E2B-it` and `google/diffusiongemma-26B-A4B-it`), tune temperature/max tokens/timeouts, edit alert/benign keyword chips, and inspect `routing_action` / `dispatch_action` traces in the Live AI Telemetry log.
+- **Model & Runtime Selectors:** Select Vertex AI Gemini models or vLLM Gemma models (including `google/gemma-4-E2B-it` and `google/diffusiongemma-26B-A4B-it`), tune temperature/max tokens/timeouts under mandatory `FAIL_SAFE` safety semantics, and inspect `routing_action` / `dispatch_action` traces in the Live AI Telemetry log.
 - **AlloyDB Persistence & Versioning:** Singleton configuration table (`workflow_settings`) with revision history (`workflow_settings_history`) and automatic `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations.
 
 ---
