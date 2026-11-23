@@ -2,8 +2,10 @@
 
 import os
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings
+
+from dronewatch.models.workflow_config import TriageMode
 
 # Disable mTLS client cert provider helper which causes status code -11 errors on Linux workstations
 os.environ["CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"] = "false"
@@ -43,10 +45,19 @@ class Settings(BaseSettings):
         default=False,
         description="Enable Tier 1 Gemma vision triage before escalating to Gemini",
     )
-    triage_mode: str = Field(
-        default="DECISION_FRAMEWORK",
-        description="Tier 1 evaluation mode: DECISION_FRAMEWORK or KEYWORD_LEGACY",
+    triage_mode: TriageMode = Field(
+        default=TriageMode.DECISION_FRAMEWORK,
+        description="Tier 1 evaluation mode (exclusively DECISION_FRAMEWORK)",
     )
+
+    @field_validator("triage_mode", mode="before")
+    @classmethod
+    def normalize_triage_mode(cls, v: object) -> object:
+        """Normalize string input to uppercase before TriageMode enum validation."""
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
     gemma_service_url: str = Field(
         default="",
         description="Internal Cloud Run URL for Gemma inference service",

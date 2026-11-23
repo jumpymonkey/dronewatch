@@ -501,20 +501,13 @@ class GemmaTriageClient:
 
         try:
             b64_image = base64.b64encode(frame_bytes).decode("ascii")
-            use_decision_framework = mode == TriageMode.DECISION_FRAMEWORK
 
             if request_scene_description:
                 prompt_text = self.settings.gemma_scene_description_prompt
                 tokens = 64
-            elif use_decision_framework:
+            else:
                 prompt_text = self._build_system1_prompt(prompt or self.prompt)
                 tokens = min(vllm_max_tokens, 8) if vllm_max_tokens is not None else 4
-            elif prompt is not None and prompt.strip():
-                prompt_text = prompt
-                tokens = vllm_max_tokens if vllm_max_tokens is not None else 32
-            else:
-                prompt_text = self.prompt
-                tokens = vllm_max_tokens if vllm_max_tokens is not None else 32
 
             temp = vllm_temperature if vllm_temperature is not None else 0.0
 
@@ -536,13 +529,12 @@ class GemmaTriageClient:
                 ],
                 "max_tokens": tokens,
                 "temperature": temp,
+                "logprobs": True,
+                "top_logprobs": 5,
             }
 
-            if use_decision_framework:
-                payload["logprobs"] = True
-                payload["top_logprobs"] = 5
-                if not request_scene_description and self._supports_guided_choice:
-                    payload["guided_choice"] = ["SAFE", "SUSPICIOUS", "CRITICAL"]
+            if not request_scene_description and self._supports_guided_choice:
+                payload["guided_choice"] = ["SAFE", "SUSPICIOUS", "CRITICAL"]
 
             headers = {
                 "Content-Type": "application/json",
@@ -596,11 +588,7 @@ class GemmaTriageClient:
             elif "output" in data:
                 raw_content = str(data["output"])
 
-            calibrated = (
-                self._extract_logprob_calibration(first_choice)
-                if use_decision_framework and first_choice
-                else None
-            )
+            calibrated = self._extract_logprob_calibration(first_choice) if first_choice else None
 
             if calibrated is not None:
                 verdict, score, class_probs = calibrated

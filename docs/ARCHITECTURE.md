@@ -506,8 +506,8 @@ When configured for self-hosted escalation (`escalation_target=GEMMA`), `GemmaTr
 
 Threat alerts are gated on `confidence_score >= effective_dispatch_threshold` (`dispatch_confidence_threshold` if configured, else `gemma_triage_threshold`), allowing sensitive Tier 1 screening without noisy operator sirens.
 
-### 11.5 Clause-Scoped Negation Safety & Legacy Fallback
-When operating in `KEYWORD_LEGACY` mode or when a vLLM server lacks `top_logprobs` / `guided_choice` support (triggering automatic HTTP 400/422 retry fallback), `GemmaTriageClient._strip_negated_clauses()` splits text along punctuation and contrastive conjunction boundaries (`but`, `however`, `except`, `yet`, `although`, `while`) before stripping negated clauses (`"no hazards or unauthorized vehicles"`). This eliminates false-positive escalations on benign negated statements while preserving true alerts after contrastive clauses (`"No fire visible, but an intruder is climbing the fence"`).
+### 11.5 Clause-Scoped Negation Safety for Uncalibrated / Heartbeat Fallback
+`DECISION_FRAMEWORK` is the sole supported Tier 1 evaluation mode (`KEYWORD_LEGACY` has been retired). When evaluating 10-second natural-language scene heartbeats (`request_scene_description=True`) or if an endpoint omits `top_logprobs`, `GemmaTriageClient._strip_negated_clauses()` splits text along punctuation and contrastive conjunction boundaries (`but`, `however`, `except`, `yet`, `although`, `while`) before stripping negated clauses (`"no hazards or unauthorized vehicles"`). This eliminates false-positive escalations on benign negated statements while preserving true alerts after contrastive clauses (`"No fire visible, but an intruder is climbing the fence"`).
 
 ### 11.6 Observability & Telemetry Audit Contract
 Every evaluated frame and security incident publishes full attribution metadata across WebSockets, AlloyDB, and Cloud Logging:

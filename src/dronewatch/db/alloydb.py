@@ -513,9 +513,7 @@ class AlloyDBManager:
 
                         return WorkflowConfig(
                             enable_tier1_gemma=row["enable_tier1_gemma"],
-                            triage_mode=TriageMode(
-                                row["triage_mode"] or TriageMode.DECISION_FRAMEWORK
-                            ),
+                            triage_mode=TriageMode.DECISION_FRAMEWORK,
                             gemma_triage_prompt=row["gemma_triage_prompt"],
                             suppress_threshold=row["suppress_threshold"]
                             if row["suppress_threshold"] is not None

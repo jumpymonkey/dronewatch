@@ -141,9 +141,9 @@ class DecisionTelemetryEvent(BaseModel):
     video_timestamp_formatted: str | None = Field(
         default=None, description="Formatted video timecode e.g. 02:42"
     )
-    triage_mode: str = Field(
+    triage_mode: Literal["DECISION_FRAMEWORK"] = Field(
         default="DECISION_FRAMEWORK",
-        description="Active Tier 1 triage mode (DECISION_FRAMEWORK or KEYWORD_LEGACY)",
+        description="Active Tier 1 System 1 triage mode (DECISION_FRAMEWORK)",
     )
     model_name: str | None = Field(default=None, description="Tier 1 serving model identifier")
     verdict: TriageVerdict = Field(default=TriageVerdict.SAFE, description="System 1 choice token")

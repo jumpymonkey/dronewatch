@@ -204,7 +204,7 @@ export default function AdminView() {
 
   const normalizeConfig = (data) => ({
     ...data,
-    triage_mode: data.triage_mode || 'DECISION_FRAMEWORK',
+    triage_mode: 'DECISION_FRAMEWORK',
     suppress_threshold: data.suppress_threshold ?? 0.25,
     gemma_triage_threshold: data.gemma_triage_threshold ?? 0.5,
     dispatch_confidence_threshold:
@@ -265,7 +265,6 @@ export default function AdminView() {
     config &&
     initialConfig &&
     (config.enable_tier1_gemma !== initialConfig.enable_tier1_gemma ||
-      config.triage_mode !== initialConfig.triage_mode ||
       config.gemma_triage_prompt !== initialConfig.gemma_triage_prompt ||
       config.suppress_threshold !== initialConfig.suppress_threshold ||
       config.gemma_triage_threshold !== initialConfig.gemma_triage_threshold ||
@@ -296,7 +295,7 @@ export default function AdminView() {
 
     const payload = {
       enable_tier1_gemma: config.enable_tier1_gemma,
-      triage_mode: config.triage_mode || 'DECISION_FRAMEWORK',
+      triage_mode: 'DECISION_FRAMEWORK',
       gemma_triage_prompt: config.gemma_triage_prompt,
       suppress_threshold: parseFloat(config.suppress_threshold),
       gemma_triage_threshold: parseFloat(config.gemma_triage_threshold),
@@ -498,71 +497,28 @@ export default function AdminView() {
               !config?.enable_tier1_gemma ? 'disabled-dim' : ''
             }`}
           >
-            {/* Triage Mode Selector Cards */}
+            {/* Active Tier 1 Decision Engine Mode Banner */}
             <div className="form-group" style={{ marginBottom: '1.25rem' }}>
               <div className="label-with-hint">
                 <label>Tier 1 Decision Engine Mode</label>
                 <span className="hint-text">
-                  Select calibrated System 1 logprob decision engine or legacy keyword fallback
+                  Canonical System 1 calibrated logprob engine (legacy keyword mode retired)
                 </span>
               </div>
-              <div className="policy-cards">
-                <div
-                  className={`policy-card ${
-                    (config?.triage_mode || 'DECISION_FRAMEWORK') === 'DECISION_FRAMEWORK'
-                      ? 'selected-fail-safe'
-                      : ''
-                  }`}
-                  onClick={() =>
-                    setConfig((prev) => ({ ...prev, triage_mode: 'DECISION_FRAMEWORK' }))
-                  }
-                >
-                  <div className="policy-card-header">
-                    <span className="policy-title">
-                      DECISION_FRAMEWORK (Recommended &bull; System 1 Logprobs)
-                    </span>
-                    <div className="target-radio-indicator">
-                      <div
-                        className="radio-inner"
-                        style={{
-                          opacity:
-                            (config?.triage_mode || 'DECISION_FRAMEWORK') === 'DECISION_FRAMEWORK'
-                              ? 1
-                              : 0,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <p className="policy-desc">
-                    Constrained 1-token decoding with softmax calibration over vLLM top_logprobs,
-                    Shannon entropy awareness, and 3-band temporal corroboration.
-                  </p>
+              <div
+                className="policy-card selected-fail-safe"
+                style={{ cursor: 'default' }}
+              >
+                <div className="policy-card-header">
+                  <span className="policy-title">
+                    DECISION_FRAMEWORK (Active &bull; System 1 vLLM Logprobs)
+                  </span>
                 </div>
-
-                <div
-                  className={`policy-card ${
-                    config?.triage_mode === 'KEYWORD_LEGACY' ? 'selected-conservative' : ''
-                  }`}
-                  onClick={() =>
-                    setConfig((prev) => ({ ...prev, triage_mode: 'KEYWORD_LEGACY' }))
-                  }
-                >
-                  <div className="policy-card-header">
-                    <span className="policy-title">KEYWORD_LEGACY (Negation-Safe Text)</span>
-                    <div className="target-radio-indicator">
-                      <div
-                        className="radio-inner"
-                        style={{
-                          opacity: config?.triage_mode === 'KEYWORD_LEGACY' ? 1 : 0,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <p className="policy-desc">
-                    Evaluates free-form model responses against clause-scoped alert and benign
-                    keyword taxonomies using fixed confidence buckets.
-                  </p>
-                </div>
+                <p className="policy-desc">
+                  Constrained 1-token decoding (SAFE, SUSPICIOUS, CRITICAL) with exact softmax
+                  calibration over vLLM top_logprobs, Shannon entropy awareness, and 3-band
+                  temporal corroboration.
+                </p>
               </div>
             </div>
 

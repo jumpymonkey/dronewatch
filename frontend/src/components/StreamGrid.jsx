@@ -172,12 +172,12 @@ export default function StreamGrid({
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
                         <span
                           className={`decision-mode-tag ${
-                            decision.calibrated_from_logprobs ? 'mode-logprob' : 'mode-keyword'
+                            decision.calibrated_from_logprobs ? 'mode-logprob' : 'mode-fallback'
                           }`}
                           title={
                             decision.calibrated_from_logprobs
                               ? 'Calibrated via exact vLLM top-logprobs softmax'
-                              : `Mode: ${decision.triage_mode}`
+                              : 'System 1 scene heartbeat / uncalibrated fallback'
                           }
                         >
                           <Activity size={10} style={{ marginRight: '3px' }} />

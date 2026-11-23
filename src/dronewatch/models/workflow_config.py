@@ -108,7 +108,6 @@ class TriageMode(StrEnum):
     """Evaluation strategy for Tier 1 front-line triage."""
 
     DECISION_FRAMEWORK = "DECISION_FRAMEWORK"
-    KEYWORD_LEGACY = "KEYWORD_LEGACY"
 
 
 class WorkflowConfig(BaseModel):
@@ -122,7 +121,7 @@ class WorkflowConfig(BaseModel):
     )
     triage_mode: TriageMode = Field(
         default=TriageMode.DECISION_FRAMEWORK,
-        description="System 1 logprob/choice decision framework vs legacy keyword matching",
+        description="Tier 1 System 1 logprob/choice decision framework mode",
     )
     gemma_triage_prompt: str = Field(
         default=DEFAULT_GEMMA_TRIAGE_PROMPT,

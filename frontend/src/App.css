@@ -1785,7 +1785,7 @@ body {
   border: 1px solid rgba(0, 242, 254, 0.38);
 }
 
-.decision-mode-tag.mode-keyword {
+.decision-mode-tag.mode-fallback {
   color: #ffab40;
   background: rgba(255, 171, 64, 0.14);
   border: 1px solid rgba(255, 171, 64, 0.38);

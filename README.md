@@ -173,7 +173,7 @@ When deployed to Google Cloud Platform for production campus surveillance, Drone
 - **Frontend Error Resilience:** The React + Vite frontend (`StreamGrid`) features auto-retry logic with cache-busting on `<img className="video-player">` elements to seamlessly manage RTSP connection handshakes.
 
 ### 4. Dynamic Workflow Administration Console (`AdminView.jsx`)
-- **Hot-Reloaded System 1 Controls:** Switch live between `DECISION_FRAMEWORK` (vLLM logprobs) and `KEYWORD_LEGACY`, tune Band 0 (`suppress_threshold`) and Band 2 (`gemma_triage_threshold`) sliders, adjust `k-of-n` corroboration depth (`corroboration_hits` / `corroboration_window`), and configure the `escalation_cooldown_seconds` anti-snowball window.
+- **Hot-Reloaded System 1 Controls:** Tune Band 0 (`suppress_threshold`) and Band 2 (`gemma_triage_threshold`) sliders in `DECISION_FRAMEWORK` mode, adjust `k-of-n` corroboration depth (`corroboration_hits` / `corroboration_window`), and configure the `escalation_cooldown_seconds` anti-snowball window.
 - **Independent Tier 2 Cutoff:** Toggle an independent `dispatch_confidence_threshold` or inherit the Tier 1 Band 2 cutoff.
 - **Model & Runtime Selectors:** Select Vertex AI Gemini models or vLLM Gemma models (including `google/gemma-4-E2B-it` and `google/diffusiongemma-26B-A4B-it`), tune temperature/max tokens/timeouts, edit alert/benign keyword chips, and inspect `routing_action` / `dispatch_action` traces in the Live AI Telemetry log.
 - **AlloyDB Persistence & Versioning:** Singleton configuration table (`workflow_settings`) with revision history (`workflow_settings_history`) and automatic `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations.
@@ -191,7 +191,7 @@ Environment variables are loaded via `pydantic-settings` from `.env`:
 | `DRONEWATCH_GEMINI_MODEL` | `gemini-3.6-flash` | Default Gemini model version for Tier 2 escalation |
 | `DRONEWATCH_USE_VERTEX_AI` | `true` | Enable Vertex AI client initialization |
 | `DRONEWATCH_ENABLE_TIER1_GEMMA` | `false` | Enable Tier 1 Gemma inference triage gate |
-| `DRONEWATCH_TRIAGE_MODE` | `DECISION_FRAMEWORK` | Tier 1 mode (`DECISION_FRAMEWORK` or `KEYWORD_LEGACY`) |
+| `DRONEWATCH_TRIAGE_MODE` | `DECISION_FRAMEWORK` | Canonical Tier 1 mode (`DECISION_FRAMEWORK` only) |
 | `DRONEWATCH_GEMMA_SERVICE_URL` | `""` | Internal Cloud Run URL for Tier 1 triage |
 | `DRONEWATCH_GEMMA_MODEL_NAME` | `google/gemma-4-E2B-it` | Target model identifier served by vLLM |
 | `DRONEWATCH_SUPPRESS_THRESHOLD` | `0.25` | Band 0 ceiling below which `P(threat)` is suppressed |

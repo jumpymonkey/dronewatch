@@ -22,7 +22,7 @@ from dronewatch.models.triage import (
     TriageClassProbabilities,
     TriageVerdict,
 )
-from dronewatch.models.workflow_config import TriageMode, WorkflowConfig
+from dronewatch.models.workflow_config import TriageMode, WorkflowConfig, WorkflowConfigUpdate
 from dronewatch.services.analyzer import GeminiVideoAnalyzer
 from dronewatch.services.decision_engine import DecisionEngine
 from dronewatch.services.gemma_client import GemmaTriageClient
@@ -534,3 +534,19 @@ async def test_stream_processor_emits_live_decision_telemetry_and_counts() -> No
         "policy_suppressed": 0,
         "active_alerts": 1,
     }
+
+
+@pytest.mark.parametrize("legacy_value", ["KEYWORD_LEGACY", "keyword_legacy"])
+def test_keyword_legacy_triage_mode_is_rejected(legacy_value: str) -> None:
+    """Verify retired KEYWORD_LEGACY mode is strictly rejected across all boundaries."""
+    with pytest.raises(ValueError):
+        TriageMode(legacy_value)
+
+    with pytest.raises(ValidationError):
+        Settings(triage_mode=legacy_value)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        WorkflowConfig(triage_mode=legacy_value)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        WorkflowConfigUpdate(triage_mode=legacy_value)  # type: ignore[arg-type]
